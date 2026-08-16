@@ -1,0 +1,41 @@
+// This fixture is source text, not a compiled package: it is stored as .txt so
+// the repository's own build never links it. The scanner reads syntax, so the
+// file only has to parse.
+package sample
+
+import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	weak "crypto/md5"
+)
+
+func generateSigningKey() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
+}
+
+func generateSessionKey(bits int) (*rsa.PrivateKey, error) {
+	// The size arrives in a variable, so the scanner cannot report it.
+	return rsa.GenerateKey(rand.Reader, bits)
+}
+
+func generateDeviceKey() (*ecdsa.PrivateKey, error) {
+	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+}
+
+func digest(payload []byte) [32]byte {
+	return sha256.Sum256(payload)
+}
+
+// Imported under an alias, which is why the scanner reads imports instead of
+// assuming the last path element.
+func legacyChecksum(payload []byte) []byte {
+	h := weak.New()
+	h.Write(payload)
+	return h.Sum(nil)
+}
+
+// Not cryptography: a variable that merely mentions the word.
+var rsaNote = "rsa.GenerateKey is called above"
