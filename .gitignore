@@ -1,0 +1,7 @@
+# Secrets never live in the tree.
+.env
+.env.*
+
+# Build output.
+/cbomscope
+/dist/
