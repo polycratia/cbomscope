@@ -56,6 +56,23 @@ func TestProtocolVersionsAreJudgedOnTheirOwnTerms(t *testing.T) {
 	}
 }
 
+// The 1305 in a name is part of the name, not a key size. Reading it as one
+// produced the right posture with a nonsense rationale ("about 652 bits").
+func TestNameFragmentsAreNotKeySizes(t *testing.T) {
+	chacha := Apply(asset.Asset{Name: "ChaCha20-Poly1305", Algorithm: "ChaCha20-Poly1305"})
+	if chacha.Posture != asset.QuantumSafe {
+		t.Errorf("ChaCha20 without a stated size = %s, want quantum_safe: its keys are 256-bit by definition", chacha.Posture)
+	}
+	if strings.Contains(chacha.Rationale, "652") {
+		t.Errorf("rationale %q was derived from the 1305 in the name", chacha.Rationale)
+	}
+
+	weird := Apply(asset.Asset{Name: "AES-1305", Algorithm: "AES-1305"})
+	if weird.Posture != asset.PostureUnknown {
+		t.Errorf("AES with an implausible size = %s, want unknown rather than a guess", weird.Posture)
+	}
+}
+
 // Two ways of not knowing, both of which must survive to the report.
 func TestApplyAdmitsWhatItCannotJudge(t *testing.T) {
 	unmapped := Apply(asset.Asset{Name: "Serpent", Algorithm: "Serpent"})

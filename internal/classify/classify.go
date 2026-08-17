@@ -128,8 +128,20 @@ func isHybrid(name string) bool {
 
 func symmetric(a asset.Asset, name string) (asset.Posture, string) {
 	bits := a.KeySize
+	// ChaCha20 keys are 256-bit by definition; there is no other size to
+	// determine. And its name must never reach trailingBits, which would read
+	// the 1305 of Poly1305 as a key size and produce a confident nonsense
+	// rationale ("about 652 bits of quantum work").
+	if bits == 0 && strings.HasPrefix(name, "CHACHA") {
+		bits = 256
+	}
 	if bits == 0 {
 		bits = trailingBits(name)
+		// A symmetric key is 128, 192 or 256 bits. Anything else scraped from a
+		// name is a fragment of the name, not a size.
+		if bits != 128 && bits != 192 && bits != 256 {
+			bits = 0
+		}
 	}
 	switch {
 	case bits == 0:
