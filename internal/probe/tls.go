@@ -73,14 +73,16 @@ func fromState(address string, state tls.ConnectionState) []asset.Asset {
 	return assets
 }
 
-// cipherAsset turns a negotiated suite into the bulk cipher it implies. The
-// suite name is kept as evidence so a reader can check the reading.
+// cipherAsset turns a negotiated suite into the bulk cipher it implies, with
+// the mode the suite name states. The suite name is kept as evidence so a
+// reader can check the reading.
 func cipherAsset(suite uint16, at asset.Location) asset.Asset {
 	name := tls.CipherSuiteName(suite)
 	a := asset.Asset{
 		Name:      name,
 		Kind:      asset.Algorithm,
 		Primitive: asset.BlockCipher,
+		Mode:      cipherMode(name),
 		Location:  at,
 		Evidence:  "negotiated cipher suite " + name,
 	}
@@ -90,11 +92,29 @@ func cipherAsset(suite uint16, at asset.Location) asset.Asset {
 	case strings.Contains(name, "AES_128"), strings.Contains(name, "AES128"):
 		a.Algorithm, a.KeySize = "AES", 128
 	case strings.Contains(name, "CHACHA20"):
-		a.Algorithm, a.KeySize = "ChaCha20-Poly1305", 256
+		a.Algorithm, a.KeySize, a.Primitive = "ChaCha20-Poly1305", 256, asset.AE
 	default:
 		a.Algorithm = name
 	}
+	if a.Mode == asset.GCM || a.Mode == asset.CCM {
+		a.Primitive = asset.AE
+	}
 	return a
+}
+
+// cipherMode reads the mode of operation out of the suite name, which is the
+// only place a handshake states it.
+func cipherMode(name string) asset.Mode {
+	switch {
+	case strings.Contains(name, "GCM"):
+		return asset.GCM
+	case strings.Contains(name, "CCM"):
+		return asset.CCM
+	case strings.Contains(name, "CBC"):
+		return asset.CBC
+	default:
+		return ""
+	}
 }
 
 func certificateAssets(cert *x509.Certificate, at asset.Location) []asset.Asset {

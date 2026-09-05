@@ -26,9 +26,23 @@ const (
 	KEM         Primitive = "kem"       // key encapsulation
 	KeyAgree    Primitive = "key-agree" //
 	BlockCipher Primitive = "block-cipher"
+	AE          Primitive = "ae" // authenticated encryption
 	Hash        Primitive = "hash"
 	MAC         Primitive = "mac"
 	Unknown     Primitive = "unknown"
+)
+
+// Mode is a mode of operation, named the way CycloneDX names it.
+type Mode string
+
+const (
+	GCM Mode = "gcm"
+	CCM Mode = "ccm"
+	CBC Mode = "cbc"
+	CTR Mode = "ctr"
+	CFB Mode = "cfb"
+	OFB Mode = "ofb"
+	ECB Mode = "ecb"
 )
 
 // Posture is how the asset stands against a future cryptanalytically relevant
@@ -91,6 +105,9 @@ type Asset struct {
 	KeySize int `json:"key_size,omitempty"`
 	// Curve, for elliptic-curve algorithms.
 	Curve string `json:"curve,omitempty"`
+	// Mode of operation, where the finding stated one. AES in GCM and AES in ECB
+	// are not the same inventory entry.
+	Mode Mode `json:"mode,omitempty"`
 	// Posture and Rationale are filled in by the classify package.
 	Posture   Posture  `json:"posture"`
 	Rationale string   `json:"rationale,omitempty"`

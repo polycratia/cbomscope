@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/polycratia/cbomscope/internal/asset"
@@ -56,11 +57,17 @@ type CryptoProperties struct {
 	AlgorithmProperties *AlgorithmProperties `json:"algorithmProperties,omitempty"`
 }
 
+// AlgorithmProperties describes one algorithm the way CycloneDX 1.6 defines it.
+// Every field keeps its spec meaning: parameterSetIdentifier names the variant
+// that was used, and classicalSecurityLevel is strength in bits, which is a
+// different number from the key size.
 type AlgorithmProperties struct {
-	Primitive              string `json:"primitive,omitempty"`
-	ParameterSetIdentifier string `json:"parameterSetIdentifier,omitempty"`
-	Curve                  string `json:"curve,omitempty"`
-	ClassicalSecurityLevel int    `json:"classicalSecurityLevel,omitempty"`
+	Primitive                string `json:"primitive,omitempty"`
+	ParameterSetIdentifier   string `json:"parameterSetIdentifier,omitempty"`
+	Curve                    string `json:"curve,omitempty"`
+	Mode                     string `json:"mode,omitempty"`
+	ClassicalSecurityLevel   int    `json:"classicalSecurityLevel,omitempty"`
+	NISTQuantumSecurityLevel int    `json:"nistQuantumSecurityLevel,omitempty"`
 }
 
 type Property struct {
@@ -115,20 +122,102 @@ func component(a asset.Asset) Component {
 		c.Properties = append(c.Properties, Property{Name: "cbomscope:rationale", Value: a.Rationale})
 	}
 	if a.Kind == asset.Algorithm {
-		props := &AlgorithmProperties{
-			Primitive:              string(a.Primitive),
-			Curve:                  a.Curve,
-			ClassicalSecurityLevel: a.KeySize,
-		}
-		if a.KeySize > 0 {
-			props.ParameterSetIdentifier = strconv.Itoa(a.KeySize)
-		}
-		c.CryptoProperties.AlgorithmProperties = props
+		c.CryptoProperties.AlgorithmProperties = algorithmProperties(a)
 	}
 	if location := a.Location.String(); location != "unknown" {
 		c.Evidence = &Evidence{Occurrences: []Occurrence{{Location: location}}}
 	}
 	return c
+}
+
+func algorithmProperties(a asset.Asset) *AlgorithmProperties {
+	props := &AlgorithmProperties{
+		Primitive:                string(a.Primitive),
+		Curve:                    a.Curve,
+		Mode:                     string(a.Mode),
+		ClassicalSecurityLevel:   classicalSecurityLevel(a),
+		NISTQuantumSecurityLevel: quantumSecurityLevel(a),
+	}
+	if a.KeySize > 0 {
+		props.ParameterSetIdentifier = strconv.Itoa(a.KeySize)
+	}
+	return props
+}
+
+// modulusStrength pairs a modulus size with the strength NIST SP 800-57 gives
+// it. Sizes between the published pairs are left out rather than interpolated:
+// a migration gets budgeted from this number.
+var modulusStrength = map[int]int{1024: 80, 2048: 112, 3072: 128, 7680: 192, 15360: 256}
+
+// nistCategory is the NIST post-quantum security category an algorithm sits in.
+// The categories are defined by these algorithms — category 1 is an AES-128 key
+// search, category 2 a SHA-256 collision search — so the numbers are readings
+// of the definition rather than estimates.
+var nistCategory = map[string]int{
+	"ML-KEM-512":  1,
+	"ML-KEM-768":  3,
+	"ML-KEM-1024": 5,
+	"ML-DSA-44":   2,
+	"ML-DSA-65":   3,
+	"ML-DSA-87":   5,
+	"SHA-256":     2,
+	"SHA3-256":    2,
+	"SHA-384":     4,
+	"SHA3-384":    4,
+}
+
+// classicalSecurityLevel is the work an attacker faces today, in bits, which is
+// not the key size: RSA-2048 is 2048 bits of modulus and about 112 bits of
+// strength. It returns 0 wherever the number would be invented, because a wrong
+// level is worse than an absent one.
+func classicalSecurityLevel(a asset.Asset) int {
+	name := family(a)
+	// Triple DES has 168 bits of key and 112 bits of strength: a
+	// meet-in-the-middle attack costs two encryptions, not three.
+	if strings.HasPrefix(name, "3DES") || strings.Contains(name, "TRIPLEDES") {
+		return 112
+	}
+	if a.KeySize == 0 {
+		return 0
+	}
+	switch {
+	case strings.HasPrefix(name, "RSA"), strings.HasPrefix(name, "DSA"), name == "DH":
+		return modulusStrength[a.KeySize]
+	case strings.HasPrefix(name, "EC"), strings.HasPrefix(name, "ED"),
+		strings.HasPrefix(name, "X25519"), strings.HasPrefix(name, "X448"):
+		// A discrete logarithm on an n-bit curve costs about 2^(n/2).
+		return a.KeySize / 2
+	}
+	switch a.Primitive {
+	case asset.BlockCipher, asset.AE, asset.MAC:
+		return a.KeySize
+	}
+	return 0
+}
+
+func quantumSecurityLevel(a asset.Asset) int {
+	name := family(a)
+	if level, ok := nistCategory[name]; ok {
+		return level
+	}
+	if strings.HasPrefix(name, "AES") {
+		switch a.KeySize {
+		case 128:
+			return 1
+		case 192:
+			return 3
+		case 256:
+			return 5
+		}
+	}
+	return 0
+}
+
+func family(a asset.Asset) string {
+	if a.Algorithm != "" {
+		return strings.ToUpper(a.Algorithm)
+	}
+	return strings.ToUpper(a.Name)
 }
 
 // reference is stable across runs so that two scans of unchanged code produce
