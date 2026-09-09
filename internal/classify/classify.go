@@ -1,10 +1,12 @@
 // Package classify judges how a cryptographic asset stands against a future
 // quantum computer.
 //
-// The rules are the boring, published ones: Shor breaks factoring and discrete
-// logarithms outright, so RSA, DSA, DH and everything elliptic-curve falls.
-// Grover halves the effective strength of symmetric primitives, so AES-128
-// drops to about 64 bits of quantum work while AES-256 stays comfortable.
+// Every verdict is read out of the table in table.go, and every row of that
+// table names the published source it comes from: Shor for factoring and
+// discrete logarithms, Grover for symmetric keys, the FIPS documents for the
+// post-quantum standards, the RFCs for what is deprecated already. A family
+// with no row is reported as unknown rather than judged by resemblance.
+//
 // Nothing here is a prediction about when that computer arrives.
 package classify
 
@@ -15,9 +17,10 @@ import (
 	"github.com/polycratia/cbomscope/internal/asset"
 )
 
-// Apply fills in Posture and Rationale, leaving everything else untouched.
+// Apply fills in Posture, Rationale and Citation, leaving everything else
+// untouched.
 func Apply(a asset.Asset) asset.Asset {
-	a.Posture, a.Rationale = judge(a)
+	a.Posture, a.Rationale, a.Citation = judge(a)
 	return a
 }
 
@@ -30,103 +33,33 @@ func ApplyAll(assets []asset.Asset) []asset.Asset {
 	return out
 }
 
-// brokenToday lists what should already be out of use, quantum aside.
-var brokenToday = map[string]string{
-	"MD5":   "collisions are practical; unusable for signatures or integrity",
-	"SHA-1": "collisions are practical; deprecated for signatures",
-	"RC4":   "biases in the keystream make it unusable",
-	"DES":   "56-bit keys are brute-forceable",
-	"3DES":  "64-bit block size makes it vulnerable to birthday attacks on long sessions",
-}
-
-// shorBreaks lists the families whose hardness assumption Shor's algorithm
-// removes: integer factorisation and discrete logarithms, elliptic or not.
-var shorBreaks = map[string]string{
-	"RSA":        "factoring",
-	"DSA":        "discrete logarithm",
-	"DH":         "discrete logarithm",
-	"ECDSA":      "elliptic-curve discrete logarithm",
-	"ECDH":       "elliptic-curve discrete logarithm",
-	"ED25519":    "elliptic-curve discrete logarithm",
-	"X25519":     "elliptic-curve discrete logarithm",
-	"ECDSA-P256": "elliptic-curve discrete logarithm",
-}
-
-// postQuantum lists the NIST post-quantum standards by their standard names.
-var postQuantum = map[string]string{
-	"ML-KEM":    "FIPS 203",
-	"ML-DSA":    "FIPS 204",
-	"SLH-DSA":   "FIPS 205",
-	"KYBER":     "pre-standard name of ML-KEM",
-	"DILITHIUM": "pre-standard name of ML-DSA",
-}
-
-func judge(a asset.Asset) (asset.Posture, string) {
+func judge(a asset.Asset) (asset.Posture, string, string) {
 	name := strings.ToUpper(a.Algorithm)
 	if name == "" {
 		name = strings.ToUpper(a.Name)
 	}
-	if a.Kind == asset.Protocol {
-		return protocol(name)
-	}
 
-	// A hybrid key exchange holds as long as either half holds, so it is called
-	// out separately rather than being averaged into one of the other buckets.
-	if isHybrid(name) {
-		return asset.Hybrid, "classical and post-quantum key exchange combined: secure if either half holds"
-	}
-	for family, standard := range postQuantum {
-		if strings.HasPrefix(name, family) {
-			return asset.QuantumSafe, "post-quantum algorithm (" + standard + ")"
+	rule, ok := Lookup(name, a.Kind)
+	if !ok {
+		if a.Kind == asset.Protocol {
+			return asset.PostureUnknown, "unrecognised protocol version: not in the classification table", ""
 		}
+		return asset.PostureUnknown, "not in the classification table: judge this one by hand", ""
 	}
-	if reason, ok := brokenToday[name]; ok {
-		return asset.Broken, reason
-	}
-	for family, problem := range shorBreaks {
-		if strings.HasPrefix(name, family) {
-			return asset.QuantumVulnerable, "Shor's algorithm solves the underlying " + problem
-		}
+	if rule.size == nil {
+		return rule.Posture, rule.Rationale, rule.Citation
 	}
 
-	switch {
-	case strings.HasPrefix(name, "AES"), strings.HasPrefix(name, "CHACHA"):
-		return symmetric(a, name)
-	case strings.HasPrefix(name, "SHA-3"), strings.HasPrefix(name, "SHA3"):
-		return hash(a, name, 0)
-	case strings.HasPrefix(name, "SHA-"), strings.HasPrefix(name, "SHA"):
-		return hash(a, name, digestBits(name))
-	case strings.HasPrefix(name, "HMAC"):
-		return asset.QuantumReduced, "keyed hash: Grover halves the effective strength of the key"
+	posture, rationale := rule.size(a, name)
+	if posture == asset.PostureUnknown {
+		// The family was found, the size that decides it was not. A citation
+		// beside an answer nobody has would make the gap look checked.
+		return posture, rationale, ""
 	}
-	return asset.PostureUnknown, "not in the classification table: judge this one by hand"
+	return posture, rationale, rule.Citation
 }
 
-// protocol judges a protocol version. The version itself is not the thing a
-// quantum computer attacks — the key exchange and the cipher it negotiates are,
-// and those are reported as their own assets. What a version does tell you is
-// whether it is deprecated today.
-func protocol(name string) (asset.Posture, string) {
-	switch {
-	case strings.HasPrefix(name, "SSL"),
-		strings.HasPrefix(name, "TLS 1.0"),
-		strings.HasPrefix(name, "TLS 1.1"):
-		return asset.Broken, "deprecated by RFC 8996: must not be negotiated"
-	case strings.HasPrefix(name, "TLS 1.2"), strings.HasPrefix(name, "TLS 1.3"):
-		return asset.NotApplicable,
-			"a protocol version has no quantum posture of its own: see the key exchange and cipher it negotiated"
-	default:
-		return asset.PostureUnknown, "unrecognised protocol version"
-	}
-}
-
-func isHybrid(name string) bool {
-	// Named the way TLS reports them, e.g. X25519MLKEM768.
-	return strings.Contains(name, "MLKEM") && strings.Contains(name, "X25519") ||
-		strings.Contains(name, "HYBRID")
-}
-
-func symmetric(a asset.Asset, name string) (asset.Posture, string) {
+func symmetricSize(a asset.Asset, name string) (asset.Posture, string) {
 	bits := a.KeySize
 	// ChaCha20 keys are 256-bit by definition; there is no other size to
 	// determine. And its name must never reach trailingBits, which would read
@@ -154,10 +87,9 @@ func symmetric(a asset.Asset, name string) (asset.Posture, string) {
 	}
 }
 
-func hash(a asset.Asset, name string, bits int) (asset.Posture, string) {
-	if bits == 0 {
-		bits = trailingBits(name)
-	}
+// digestSize reads the size out of names like SHA-256 and SHA3-512.
+func digestSize(_ asset.Asset, name string) (asset.Posture, string) {
+	bits := trailingBits(name)
 	switch {
 	case bits == 0:
 		return asset.PostureUnknown, "digest size not determined"
@@ -168,9 +100,6 @@ func hash(a asset.Asset, name string, bits int) (asset.Posture, string) {
 			"%d-bit digest: quantum collision search reduces the margin; SHA-384 or larger is the usual answer", bits)
 	}
 }
-
-// digestBits reads the size out of names like SHA-256 and SHA2-512.
-func digestBits(name string) int { return trailingBits(name) }
 
 func trailingBits(name string) int {
 	digits := ""

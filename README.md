@@ -74,6 +74,32 @@ exit code into noise on the first run and get the tool removed from CI. Use
 None of this predicts when a cryptographically relevant quantum computer
 arrives. It says what would fall if one did.
 
+## Where a verdict comes from
+
+Every verdict is a row in one table — `internal/classify/table.go` — and every
+row names the document it was read from. The citation travels with the finding,
+into `-json` output and into the CBOM as a `cbomscope:citation` property, so a
+reviewer can check a posture against FIPS 203 or RFC 8996 instead of trusting
+the tool.
+
+| Family | Verdict | Source |
+|---|---|---|
+| RSA, DSA, DH, ECDSA, ECDH, Ed25519, X25519 | `quantum_vulnerable` | Shor 1997; NIST IR 8547 |
+| AES, ChaCha20, HMAC | by key size | Grover 1996; NIST IR 8547 |
+| SHA-2, SHA-3 | by digest size | Brassard, Hoyer and Tapp 1998 |
+| ML-KEM / Kyber, ML-DSA / Dilithium, SLH-DSA | `quantum_safe` | FIPS 203, 204, 205 |
+| LMS, XMSS | `quantum_safe` | SP 800-208 |
+| MD5, SHA-1, RC4, DES, 3DES | `broken` | RFC 6151, SHAttered, RFC 7465, SP 800-131A, Sweet32 |
+| SSL, TLS 1.0/1.1 | `broken` | RFC 7568, RFC 8996 |
+| TLS 1.2/1.3 | `not_applicable` | RFC 5246, RFC 8446 |
+| X25519MLKEM768 and other hybrid groups | `hybrid` | draft-ietf-tls-hybrid-design |
+
+A family with no row is reported as `unknown`, with a rationale saying a person
+has to judge it, and with no citation attached — a source printed beside an
+answer nobody has would make the gap look checked. Keeping this as data rather
+than as a chain of conditions is the point: the gaps are visible, and closing
+one is a row.
+
 ## Install
 
 ```bash
@@ -92,7 +118,7 @@ listed rather than implied.
 |---|---|
 | Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
 | Live probing | TLS: version, cipher suite, key exchange group, certificate key and signature |
-| Output | CycloneDX 1.6 cryptographic assets; the posture travels as a `cbomscope:` property, since the spec has no field for it |
+| Output | CycloneDX 1.6 cryptographic assets; the posture and its citation travel as `cbomscope:` properties, since the spec has no field for them |
 | Not yet | other languages, certificate and key files on disk, container images, config files, JOSE/JWT algorithms, SSH |
 
 ## Alongside CBOMkit
@@ -120,3 +146,5 @@ suite needs no network.
 ## License
 
 MIT
+
+Made by [polycratia](https://polycratia.com).

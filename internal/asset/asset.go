@@ -108,10 +108,14 @@ type Asset struct {
 	// Mode of operation, where the finding stated one. AES in GCM and AES in ECB
 	// are not the same inventory entry.
 	Mode Mode `json:"mode,omitempty"`
-	// Posture and Rationale are filled in by the classify package.
-	Posture   Posture  `json:"posture"`
-	Rationale string   `json:"rationale,omitempty"`
-	Location  Location `json:"location"`
+	// Posture, Rationale and Citation are filled in by the classify package.
+	Posture   Posture `json:"posture"`
+	Rationale string  `json:"rationale,omitempty"`
+	// Citation is the published source the verdict was read from. It stays empty
+	// on an unknown: a source printed beside an answer nobody has would make the
+	// gap look checked.
+	Citation string   `json:"citation,omitempty"`
+	Location Location `json:"location"`
 	// Evidence is the literal thing that was seen: the call, the cipher suite,
 	// the certificate field. It lets a reader check the finding by hand.
 	Evidence string `json:"evidence,omitempty"`
