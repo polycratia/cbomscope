@@ -94,6 +94,19 @@ the tool.
 | TLS 1.2/1.3 | `not_applicable` | RFC 5246, RFC 8446 |
 | X25519MLKEM768 and other hybrid groups | `hybrid` | draft-ietf-tls-hybrid-design |
 
+Because it is data, the table prints itself — reviewing what the tool believes
+does not mean reading its source:
+
+```console
+$ cbomscope table
+FAMILY          VERDICT             SOURCE
+X25519MLKEM768  hybrid              draft-ietf-tls-hybrid-design: hybrid key exchange in TLS 1.3
+ML-KEM          quantum_safe        NIST FIPS 203: ML-KEM, module-lattice key encapsulation
+RSA             quantum_vulnerable  Shor 1997, SIAM J. Comput. 26(5): polynomial-time factoring and discrete logarithms; NIST IR 8547
+AES             by size             Grover 1996, STOC: a quadratic speedup for unstructured search; NIST IR 8547
+...
+```
+
 A family with no row is reported as `unknown`, with a rationale saying a person
 has to judge it, and with no citation attached — a source printed beside an
 answer nobody has would make the gap look checked. Keeping this as data rather

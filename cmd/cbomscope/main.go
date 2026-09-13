@@ -34,6 +34,9 @@ Usage:
   cbomscope cbom <dir> [-probe <host:port>] [-o <file>]
         Write a CycloneDX 1.6 cryptography bill of materials.
 
+  cbomscope table [-json]
+        Print the classification table every verdict is read from.
+
 Postures: broken, quantum_vulnerable, quantum_reduced, hybrid, quantum_safe,
 not_applicable, unknown.
 By default only "broken" fails the command: it is the one that is already a
@@ -69,6 +72,8 @@ func run(args []string, out io.Writer) error {
 		return cmdProbe(args[1:], out)
 	case "cbom":
 		return cmdCBOM(args[1:], out)
+	case "table":
+		return cmdTable(args[1:], out)
 	case "help", "-h", "--help":
 		fmt.Fprint(out, usage)
 		return nil
@@ -184,6 +189,36 @@ func cmdCBOM(args []string, out io.Writer) error {
 		return err
 	}
 	return os.WriteFile(*outPath, body, 0o644)
+}
+
+// cmdTable prints the classification table itself. A reviewer who wants to
+// check a posture should not have to read the source to find out where the
+// verdict came from, and a family missing from this listing is the honest shape
+// of a gap.
+func cmdTable(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("table", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print the table as JSON")
+	positional, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 0 {
+		return fmt.Errorf("table takes no arguments")
+	}
+	if *asJSON {
+		return writeJSON(out, classify.Table)
+	}
+
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "FAMILY\tVERDICT\tSOURCE")
+	for _, rule := range classify.Table {
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", rule.Family, rule.PostureLabel(), rule.Citation)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "\n%d row(s). A family with no row here is reported as unknown.\n", len(classify.Table))
+	return nil
 }
 
 // order puts the postures that need a decision first.
