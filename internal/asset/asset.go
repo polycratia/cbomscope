@@ -116,6 +116,10 @@ type Asset struct {
 	// gap look checked.
 	Citation string   `json:"citation,omitempty"`
 	Location Location `json:"location"`
+	// Module is the dependency a finding came from, as path@version, and empty
+	// for first-party code. It is the difference between cryptography a team can
+	// change and cryptography it has to upgrade away from.
+	Module string `json:"module,omitempty"`
 	// Evidence is the literal thing that was seen: the call, the cipher suite,
 	// the certificate field. It lets a reader check the finding by hand.
 	Evidence string `json:"evidence,omitempty"`

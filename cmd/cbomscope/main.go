@@ -1,6 +1,6 @@
 // Command cbomscope inventories the cryptography a project uses — in its Go
-// sources and in what its endpoints actually negotiate — and writes it out as a
-// CycloneDX cryptography bill of materials.
+// sources, in the modules it depends on, and in what its endpoints actually
+// negotiate — and writes it out as a CycloneDX cryptography bill of materials.
 package main
 
 import (
@@ -25,13 +25,14 @@ import (
 const usage = `cbomscope — what cryptography is in here, and how it stands against a quantum computer.
 
 Usage:
-  cbomscope scan <dir> [-json] [-fail-on <posture>]
+  cbomscope scan <dir> [-deps] [-json] [-fail-on <posture>]
         Read Go sources and report the cryptography they use.
+        -deps also reads the modules go.mod requires.
 
   cbomscope probe <host:port> [-json]
         Handshake with a TLS endpoint and report what it negotiated.
 
-  cbomscope cbom <dir> [-probe <host:port>] [-o <file>]
+  cbomscope cbom <dir> [-deps] [-probe <host:port>] [-o <file>]
         Write a CycloneDX 1.6 cryptography bill of materials.
 
   cbomscope table [-json]
@@ -102,6 +103,7 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 func cmdScan(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print assets as JSON")
+	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
 	failOn := fs.String("fail-on", string(asset.Broken), "posture that makes the command exit 1 (none to disable)")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -115,6 +117,16 @@ func cmdScan(args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	var unread []scan.Module
+	if *deps {
+		dependencies, err := scan.Deps(positional[0])
+		if err != nil {
+			return err
+		}
+		found = append(found, dependencies.Assets...)
+		unread = dependencies.Missing
+	}
+
 	assets := classify.ApplyAll(found)
 	if *asJSON {
 		if err := writeJSON(out, assets); err != nil {
@@ -122,6 +134,7 @@ func cmdScan(args []string, out io.Writer) error {
 		}
 	} else {
 		report(out, assets)
+		reportUnread(out, unread)
 	}
 	return gate(assets, *failOn)
 }
@@ -155,6 +168,7 @@ func cmdProbe(args []string, out io.Writer) error {
 func cmdCBOM(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("cbom", flag.ContinueOnError)
 	endpoint := fs.String("probe", "", "also probe this host:port and include what it negotiated")
+	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
 	outPath := fs.String("o", "", "write the document here instead of stdout")
 	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
 	positional, err := parseArgs(fs, args)
@@ -168,6 +182,13 @@ func cmdCBOM(args []string, out io.Writer) error {
 	found, err := scan.Dir(positional[0])
 	if err != nil {
 		return err
+	}
+	if *deps {
+		dependencies, err := scan.Deps(positional[0])
+		if err != nil {
+			return err
+		}
+		found = append(found, dependencies.Assets...)
 	}
 	if *endpoint != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -261,6 +282,18 @@ func report(out io.Writer, assets []asset.Asset) {
 		}
 	}
 	fmt.Fprintln(out)
+}
+
+// reportUnread names the dependencies whose source was not on disk. Leaving
+// them out silently would read exactly like having checked them.
+func reportUnread(out io.Writer, modules []scan.Module) {
+	if len(modules) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "\n%d module(s) required by go.mod were not read; run `go mod download` to include them:\n", len(modules))
+	for _, m := range modules {
+		fmt.Fprintln(out, "  "+m.Coordinate())
+	}
 }
 
 func gate(assets []asset.Asset, failOn string) error {
