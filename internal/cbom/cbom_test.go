@@ -25,6 +25,14 @@ func sample() []asset.Asset {
 	}
 }
 
+func properties(c Component) map[string]string {
+	out := map[string]string{}
+	for _, p := range c.Properties {
+		out[p.Name] = p.Value
+	}
+	return out
+}
+
 func TestBuildShape(t *testing.T) {
 	doc := Build(sample(), time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC))
 	if doc.BOMFormat != "CycloneDX" || doc.SpecVersion != "1.6" {
@@ -98,6 +106,28 @@ func TestPostureTravelsAsANamespacedProperty(t *testing.T) {
 	}
 	if first.Evidence == nil || first.Evidence.Occurrences[0].Location != "internal/token/sign.go:42" {
 		t.Errorf("occurrence = %+v, want the source position", first.Evidence)
+	}
+}
+
+// Where a finding came from decides who does the work: first-party cryptography
+// gets changed, a dependency's gets upgraded away from. A document that does not
+// say which is which cannot be planned from.
+func TestDependencyFindingsNameTheirModule(t *testing.T) {
+	doc := Build([]asset.Asset{{
+		Name: "MD5", Kind: asset.Algorithm, Primitive: asset.Hash, Algorithm: "MD5",
+		Posture: asset.Broken, Rationale: "collisions are practical",
+		Location: asset.Location{File: "example.com/dep@v1.2.0/checksum.go", Line: 31},
+		Module:   "example.com/dep@v1.2.0",
+		Evidence: "md5.Sum()",
+	}}, time.Now())
+
+	if got := properties(doc.Components[0])["cbomscope:module"]; got != "example.com/dep@v1.2.0" {
+		t.Errorf("module property = %q, want the dependency that introduced the finding", got)
+	}
+
+	firstParty := Build(sample(), time.Now()).Components[0]
+	if _, ok := properties(firstParty)["cbomscope:module"]; ok {
+		t.Error("code in this repository was attributed to a module")
 	}
 }
 

@@ -40,6 +40,43 @@ post-quantum group, because no source in the repository chose it.
 cbomscope cbom . -probe api.example.com:443 -o cbom.json
 ```
 
+## Most of the cryptography was written by somebody else
+
+`-deps` reads the source of every module `go.mod` requires — direct and indirect
+alike, out of a `vendor/` directory when there is one and the module cache when
+there is not — and attributes each finding to the module that introduced it.
+A dependency that still hashes with MD5 belongs in the inventory whether or not
+a first-party line mentions it.
+
+```console
+$ cbomscope scan . -deps
+POSTURE          ASSET    WHERE                                     WHY
+broken           MD5      example.com/legacy@v1.4.0/checksum.go:31  collisions are practical; unusable for signatures or integrity
+quantum_reduced  SHA-256  internal/cbom/cbom.go:137                 256-bit digest: quantum collision search reduces the margin; SHA-384 or larger is the usual answer
+
+2 asset(s): broken=1 quantum_reduced=1
+
+1 module(s) required by go.mod were not read; run `go mod download` to include them:
+  example.com/gone@v0.1.0
+```
+
+The distinction is the plan: cryptography in this repository is something a team
+changes, cryptography in a dependency is something it has to upgrade away from.
+It travels into `-json` output as `module` and into the CBOM as a
+`cbomscope:module` property.
+
+Somebody else's tree is read on different terms than ours. Tests and `testdata`
+are left out, because a consumer never links them and counting them would
+inflate the inventory with cryptography that does not ship. A file that does not
+parse is skipped rather than failing the run. A module whose source is not on
+disk is **named** in the output rather than quietly dropped: an inventory that
+skips a module silently reads exactly like one that checked it and found
+nothing.
+
+`go.mod` is parsed as syntax rather than handed to the `go` command, so an
+inventory can be taken with no toolchain and no network. A `replace` directive
+is followed to what actually ships, since that is the code that compiles.
+
 ## What it reads, and what it will not guess
 
 The scanner reads Go syntax trees, not text. An import alias is followed; a
@@ -130,8 +167,9 @@ listed rather than implied.
 | | |
 |---|---|
 | Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
+| Dependencies | `-deps` walks what `go.mod` requires, from `vendor/` or the module cache, and attributes each finding to its module |
 | Live probing | TLS: version, cipher suite, key exchange group, certificate key and signature |
-| Output | CycloneDX 1.6 cryptographic assets; the posture and its citation travel as `cbomscope:` properties, since the spec has no field for them |
+| Output | CycloneDX 1.6 cryptographic assets; the posture, its citation and the module a finding came from travel as `cbomscope:` properties, since the spec has no field for them |
 | Not yet | other languages, certificate and key files on disk, container images, config files, JOSE/JWT algorithms, SSH |
 
 ## Alongside CBOMkit

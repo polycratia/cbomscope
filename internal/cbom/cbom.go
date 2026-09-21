@@ -124,6 +124,11 @@ func component(a asset.Asset) Component {
 	if a.Citation != "" {
 		c.Properties = append(c.Properties, Property{Name: "cbomscope:citation", Value: a.Citation})
 	}
+	// Provenance decides who does the work: first-party cryptography is changed,
+	// a dependency's is upgraded away from.
+	if a.Module != "" {
+		c.Properties = append(c.Properties, Property{Name: "cbomscope:module", Value: a.Module})
+	}
 	if a.Kind == asset.Algorithm {
 		c.CryptoProperties.AlgorithmProperties = algorithmProperties(a)
 	}
