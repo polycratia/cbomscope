@@ -78,6 +78,24 @@ func (r Rule) MarshalJSON() ([]byte, error) {
 	}{r.Family, string(r.Kind), r.PostureLabel(), r.Rationale, r.Citation})
 }
 
+// The halves a hybrid name is made of. A hybrid group is spelled as a
+// concatenation, and the spellings in deployment are not only the one this Go
+// release implements: SecP256r1MLKEM768 and X25519Kyber768Draft00 are both live
+// on the public internet, and neither is found by a prefix.
+var (
+	postQuantumHalves = []string{"MLKEM", "ML-KEM", "KYBER"}
+	classicalHalves   = []string{"X25519", "X448", "SECP", "P256", "P-256", "P384", "P-384", "P521", "P-521", "ECDH"}
+)
+
+func containsAny(name string, parts []string) bool {
+	for _, part := range parts {
+		if strings.Contains(name, part) {
+			return true
+		}
+	}
+	return false
+}
+
 // Table is where every verdict comes from. It is data rather than a chain of
 // conditions so that the gaps stay visible: a family with no row here is
 // reported as unknown, and closing that gap is a row rather than a patch.
@@ -91,7 +109,7 @@ var Table = []Rule{
 		Citation:  hybridTLS,
 		match: func(name string) bool {
 			return strings.Contains(name, "HYBRID") ||
-				(strings.Contains(name, "MLKEM") && strings.Contains(name, "X25519"))
+				(containsAny(name, postQuantumHalves) && containsAny(name, classicalHalves))
 		},
 	},
 

@@ -30,7 +30,8 @@ Usage:
         -deps also reads the modules go.mod requires.
 
   cbomscope probe <host:port> [-json]
-        Handshake with a TLS endpoint and report what it negotiated.
+        Handshake with a TLS endpoint and report what it negotiated,
+        including whether the key exchange carried anything post-quantum.
 
   cbomscope cbom <dir> [-deps] [-probe <host:port>] [-o <file>]
         Write a CycloneDX 1.6 cryptography bill of materials.
@@ -141,7 +142,7 @@ func cmdScan(args []string, out io.Writer) error {
 
 func cmdProbe(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
-	asJSON := fs.Bool("json", false, "print assets as JSON")
+	asJSON := fs.Bool("json", false, "print the handshake as JSON")
 	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -153,15 +154,16 @@ func cmdProbe(args []string, out io.Writer) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	found, err := probe.Endpoint(ctx, positional[0])
+	result, err := probe.Endpoint(ctx, positional[0])
 	if err != nil {
 		return err
 	}
-	assets := classify.ApplyAll(found)
+	result.Assets = classify.ApplyAll(result.Assets)
 	if *asJSON {
-		return writeJSON(out, assets)
+		return writeJSON(out, result)
 	}
-	report(out, assets)
+	report(out, result.Assets)
+	reportKeyExchange(out, result)
 	return nil
 }
 
@@ -197,7 +199,7 @@ func cmdCBOM(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		found = append(found, negotiated...)
+		found = append(found, negotiated.Assets...)
 	}
 
 	doc := cbom.Build(classify.ApplyAll(found), time.Now())
@@ -293,6 +295,24 @@ func reportUnread(out io.Writer, modules []scan.Module) {
 	fmt.Fprintf(out, "\n%d module(s) required by go.mod were not read; run `go mod download` to include them:\n", len(modules))
 	for _, m := range modules {
 		fmt.Fprintln(out, "  "+m.Coordinate())
+	}
+}
+
+// reportKeyExchange says whether the handshake carried post-quantum key
+// exchange. It gets a line of its own because the absence is the finding: every
+// asset in the list above can look individually reasonable while the traffic is
+// being recorded today to be decrypted later.
+func reportKeyExchange(out io.Writer, r probe.Result) {
+	fmt.Fprintln(out)
+	switch r.KeyExchange {
+	case probe.KeyExchangePostQuantum:
+		fmt.Fprintf(out, "Post-quantum key exchange: %s. What is recorded off this wire today does not rest on a classical assumption alone.\n", r.Group)
+	case probe.KeyExchangeClassical:
+		fmt.Fprintf(out, "No post-quantum key exchange: %s is classical, and the probe offered a hybrid group. Traffic recorded today can be decrypted once a quantum computer exists.\n", r.Group)
+	case probe.KeyExchangeUnknown:
+		fmt.Fprintf(out, "Key exchange %s is not one this tool has a name for: check the codepoint against the IANA registry rather than reading it as classical.\n", r.Group)
+	default:
+		fmt.Fprintln(out, "The handshake reported no key exchange group, so none of it was post-quantum.")
 	}
 }
 

@@ -25,52 +25,196 @@ import (
 // is reported as unreachable rather than held onto.
 const DefaultTimeout = 10 * time.Second
 
+// KeyExchange is the reading of the negotiated group, in four states rather
+// than two: a group nobody recognised is not evidence of a classical one, and a
+// handshake that reported no group at all is a third thing again.
+type KeyExchange string
+
+const (
+	// KeyExchangePostQuantum: post-quantum key material, alone or as one half of
+	// a hybrid.
+	KeyExchangePostQuantum KeyExchange = "post_quantum"
+	// KeyExchangeClassical: the group rests entirely on a problem Shor's
+	// algorithm solves.
+	KeyExchangeClassical KeyExchange = "classical"
+	// KeyExchangeUnknown: a codepoint this tool has no name for.
+	KeyExchangeUnknown KeyExchange = "unknown"
+	// KeyExchangeNone: the handshake reported no group.
+	KeyExchangeNone KeyExchange = "none"
+)
+
+// Result is what one handshake said. The assets are the inventory; the fields
+// beside them are the reading a migration plan starts from — which group was
+// negotiated, whether any part of it was post-quantum, and what authenticated
+// the exchange.
+type Result struct {
+	Address string `json:"address"`
+	Version string `json:"version"`
+	// Group is the negotiated key exchange group, empty when the handshake
+	// reported none.
+	Group       string      `json:"group,omitempty"`
+	KeyExchange KeyExchange `json:"key_exchange"`
+	// Signature is what authenticated the handshake, as far as the handshake
+	// pins it: a scheme where the version and the key allow only one, a family
+	// where they do not.
+	Signature string        `json:"signature,omitempty"`
+	Assets    []asset.Asset `json:"assets"`
+}
+
 // Endpoint probes host:port and reports what the handshake used.
 //
 // Certificate verification is deliberately switched off: the job is to see what
 // an endpoint presents, including an expired or self-signed certificate, and
 // refusing to look would hide exactly the inventory that needs attention. The
 // connection carries no data and is closed immediately.
-func Endpoint(ctx context.Context, address string) ([]asset.Asset, error) {
+//
+// The client offers every key exchange group this Go release can perform, the
+// hybrid one included, so a classical result means the endpoint declined a
+// hybrid group that was on the table rather than that nobody asked for one.
+func Endpoint(ctx context.Context, address string) (Result, error) {
 	if _, _, err := net.SplitHostPort(address); err != nil {
-		return nil, fmt.Errorf("probe %q: expected host:port", address)
+		return Result{}, fmt.Errorf("probe %q: expected host:port", address)
 	}
 	dialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return nil, fmt.Errorf("probe %s: %w", address, err)
+		return Result{}, fmt.Errorf("probe %s: %w", address, err)
 	}
 	defer conn.Close()
 
-	state := conn.(*tls.Conn).ConnectionState()
-	return fromState(address, state), nil
+	return fromState(address, conn.(*tls.Conn).ConnectionState()), nil
 }
 
-func fromState(address string, state tls.ConnectionState) []asset.Asset {
+func fromState(address string, state tls.ConnectionState) Result {
 	at := asset.Location{Host: address}
-	assets := []asset.Asset{
+	result := Result{Address: address, Version: versionName(state.Version)}
+	result.Assets = []asset.Asset{
 		{
-			Name:     versionName(state.Version),
+			Name:     result.Version,
 			Kind:     asset.Protocol,
 			Location: at,
 			Evidence: "negotiated protocol version",
 		},
 		cipherAsset(state.CipherSuite, at),
 	}
-	if group := groupName(state); group != "" {
-		assets = append(assets, asset.Asset{
-			Name:      group,
+
+	result.Group, result.KeyExchange = keyExchange(state.CurveID)
+	if result.Group != "" {
+		result.Assets = append(result.Assets, asset.Asset{
+			Name:      result.Group,
 			Kind:      asset.Algorithm,
 			Primitive: asset.KeyAgree,
-			Algorithm: group,
+			Algorithm: result.Group,
 			Location:  at,
-			Evidence:  "negotiated key exchange group",
+			Evidence:  fmt.Sprintf("negotiated key exchange group (codepoint 0x%04x)", uint16(state.CurveID)),
 		})
 	}
+
 	if len(state.PeerCertificates) > 0 {
-		assets = append(assets, certificateAssets(state.PeerCertificates[0], at)...)
+		leaf := state.PeerCertificates[0]
+		result.Assets = append(result.Assets, certificateAssets(leaf, at)...)
+		if signature, ok := signatureAsset(leaf, state.Version, at); ok {
+			result.Signature = signature.Name
+			result.Assets = append(result.Assets, signature)
+		}
 	}
-	return assets
+	return result
+}
+
+// group is a key exchange group as a handshake names it.
+type group struct {
+	name string
+	// postQuantum is true when the group carries post-quantum key material,
+	// alone or as one half of a hybrid.
+	postQuantum bool
+}
+
+// groups names the key exchange groups by their registered codepoint rather
+// than by the constants this Go release happens to define. The post-quantum
+// ones are the reason: they are being assigned and deployed faster than any one
+// TLS stack implements them, and an inventory that prints a number for the
+// group it exists to look for is not an inventory.
+var groups = map[tls.CurveID]group{
+	tls.CurveP256:      {name: "ECDH-P256"},
+	tls.CurveP384:      {name: "ECDH-P384"},
+	tls.CurveP521:      {name: "ECDH-P521"},
+	tls.X25519:         {name: "X25519"},
+	0x001e:             {name: "X448"},
+	tls.X25519MLKEM768: {name: "X25519MLKEM768", postQuantum: true},
+	0x11eb:             {name: "SecP256r1MLKEM768", postQuantum: true},
+	0x11ed:             {name: "SecP384r1MLKEM1024", postQuantum: true},
+	0x0200:             {name: "MLKEM512", postQuantum: true},
+	0x0201:             {name: "MLKEM768", postQuantum: true},
+	0x0202:             {name: "MLKEM1024", postQuantum: true},
+	0x6399:             {name: "X25519Kyber768Draft00", postQuantum: true},
+	0x639a:             {name: "SecP256r1Kyber768Draft00", postQuantum: true},
+}
+
+// keyExchange names the negotiated group and says what it rests on. A group
+// with no entry above is named by its codepoint and reported as unrecognised:
+// calling it classical would be a verdict nobody took.
+func keyExchange(id tls.CurveID) (string, KeyExchange) {
+	if id == 0 {
+		return "", KeyExchangeNone
+	}
+	if g, ok := groups[id]; ok {
+		if g.postQuantum {
+			return g.name, KeyExchangePostQuantum
+		}
+		return g.name, KeyExchangeClassical
+	}
+	return fmt.Sprintf("key exchange group 0x%04x", uint16(id)), KeyExchangeUnknown
+}
+
+// signatureAsset describes the signature that authenticated the handshake.
+//
+// Go's TLS stack does not expose the scheme the peer signed CertificateVerify
+// with, so it is read off what constrains that choice: the leaf key and the
+// protocol version. In TLS 1.3 an ECDSA P-256 key can sign nothing but
+// ecdsa_secp256r1_sha256, and PKCS#1 v1.5 is forbidden, so an RSA key there is
+// PSS. Where TLS 1.2 leaves several digests possible, the family is reported
+// with no digest at all rather than the likely one.
+func signatureAsset(cert *x509.Certificate, version uint16, at asset.Location) (asset.Asset, bool) {
+	a := asset.Asset{Kind: asset.Algorithm, Primitive: asset.Signature, Location: at}
+	tls13 := version == tls.VersionTLS13
+	switch pub := cert.PublicKey.(type) {
+	case ed25519.PublicKey:
+		a.Name, a.Algorithm, a.KeySize = "ed25519", "Ed25519", 256
+		a.Evidence = "handshake signature scheme, pinned by an Ed25519 certificate key"
+	case *ecdsa.PublicKey:
+		a.Algorithm = "ECDSA"
+		a.Curve = pub.Curve.Params().Name
+		a.KeySize = pub.Curve.Params().BitSize
+		if scheme, ok := ecdsaSchemes[a.Curve]; ok && tls13 {
+			a.Name = scheme
+			a.Evidence = "handshake signature scheme, pinned by TLS 1.3 and an ECDSA " + a.Curve + " certificate key"
+			break
+		}
+		a.Name = "ECDSA"
+		a.Evidence = "handshake signature family; " + versionName(version) +
+			" does not pin the digest and the handshake does not expose it"
+	case *rsa.PublicKey:
+		a.Algorithm, a.KeySize = "RSA", pub.N.BitLen()
+		if tls13 {
+			a.Name = "RSA-PSS"
+			a.Evidence = "handshake signature family, pinned to PSS by TLS 1.3; the digest is not exposed"
+			break
+		}
+		a.Name = "RSA"
+		a.Evidence = "handshake signature family; " + versionName(version) +
+			" pins neither the padding nor the digest"
+	default:
+		return asset.Asset{}, false
+	}
+	return a, true
+}
+
+// ecdsaSchemes is read backwards from the TLS 1.3 registry: there the curve of
+// the key is the scheme.
+var ecdsaSchemes = map[string]string{
+	"P-256": "ecdsa_secp256r1_sha256",
+	"P-384": "ecdsa_secp384r1_sha384",
+	"P-521": "ecdsa_secp521r1_sha512",
 }
 
 // cipherAsset turns a negotiated suite into the bulk cipher it implies, with
@@ -190,27 +334,5 @@ func versionName(version uint16) string {
 		return "TLS 1.0"
 	default:
 		return fmt.Sprintf("TLS (unrecognised version 0x%04x)", version)
-	}
-}
-
-// groupName names the key exchange group. The hybrid one is the reason this
-// probe exists at all: it is the only place an inventory can see that a
-// deployment has already started its post-quantum migration.
-func groupName(state tls.ConnectionState) string {
-	switch state.CurveID {
-	case 0:
-		return ""
-	case tls.CurveP256:
-		return "ECDH-P256"
-	case tls.CurveP384:
-		return "ECDH-P384"
-	case tls.CurveP521:
-		return "ECDH-P521"
-	case tls.X25519:
-		return "X25519"
-	case tls.X25519MLKEM768:
-		return "X25519MLKEM768"
-	default:
-		return fmt.Sprintf("key exchange group %d", uint16(state.CurveID))
 	}
 }
