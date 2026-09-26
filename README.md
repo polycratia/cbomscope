@@ -30,6 +30,9 @@ hybrid              X25519MLKEM768          cloudflare.com:443  classical and po
 not_applicable      TLS 1.3                 cloudflare.com:443  a protocol version has no quantum posture of its own: see the key exchange and cipher it negotiated
 
 5 asset(s): quantum_vulnerable=2 quantum_reduced=1 hybrid=1 not_applicable=1
+
+Post-quantum key exchange: X25519MLKEM768. What is recorded off this wire today does not rest on a classical assumption alone.
+Handshake signature: ecdsa_secp256r1_sha256. A signature is forged at the moment it is verified rather than years afterwards, so this one is a deadline, not a leak.
 ```
 
 That second transcript is the reason the probe exists: source code cannot tell
@@ -90,6 +93,19 @@ the one unforgivable answer.
 The probe skips certificate verification on purpose: the job is to see what an
 endpoint presents, and an expired or self-signed certificate is exactly the
 inventory that needs attention. The connection carries no data.
+
+The groups it offers are written out in the source, hybrid first, rather than
+left to whatever the standard library defaults to that release. It is what makes
+the absence a finding: an endpoint reported as classical is one that declined a
+hybrid group that was on the table, not one nobody asked. The offered list
+travels with the answer, in `-json` as `offered` and as evidence on the group
+itself.
+
+The signature is reported only as far as the handshake pins it. Go does not
+expose the scheme the peer signed with, so it is read off what constrains that
+choice — in TLS 1.3 an ECDSA P-256 key can sign nothing but
+`ecdsa_secp256r1_sha256` — and where TLS 1.2 leaves several digests possible,
+the family is reported with no digest at all.
 
 ## The postures
 
@@ -168,7 +184,7 @@ listed rather than implied.
 |---|---|
 | Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
 | Dependencies | `-deps` walks what `go.mod` requires, from `vendor/` or the module cache, and attributes each finding to its module |
-| Live probing | TLS: version, cipher suite, key exchange group, certificate key and signature |
+| Live probing | TLS: version, cipher suite, key exchange group against the hybrid one the probe offers, certificate key and signature |
 | Output | CycloneDX 1.6 cryptographic assets; the posture, its citation and the module a finding came from travel as `cbomscope:` properties, since the spec has no field for them |
 | Not yet | other languages, certificate and key files on disk, container images, config files, JOSE/JWT algorithms, SSH |
 

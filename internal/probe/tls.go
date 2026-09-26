@@ -54,11 +54,49 @@ type Result struct {
 	// reported none.
 	Group       string      `json:"group,omitempty"`
 	KeyExchange KeyExchange `json:"key_exchange"`
+	// Offered are the groups the probe put on the table. Without them a
+	// classical answer is not a finding about the endpoint: it reads the same as
+	// a probe that never asked for anything better.
+	Offered []string `json:"offered"`
 	// Signature is what authenticated the handshake, as far as the handshake
 	// pins it: a scheme where the version and the key allow only one, a family
 	// where they do not.
 	Signature string        `json:"signature,omitempty"`
 	Assets    []asset.Asset `json:"assets"`
+}
+
+// offeredGroups is what the probe offers, hybrid first. It is written out here
+// rather than left to the standard library's default because the default moves
+// between releases and can be switched off by a GODEBUG setting: the absence of
+// post-quantum key exchange is only an endpoint's answer if a post-quantum
+// group was asked for.
+var offeredGroups = []tls.CurveID{
+	tls.X25519MLKEM768,
+	tls.X25519,
+	tls.CurveP256,
+	tls.CurveP384,
+	tls.CurveP521,
+}
+
+// Offered names every key exchange group the probe puts on the table.
+func Offered() []string {
+	out := make([]string, 0, len(offeredGroups))
+	for _, id := range offeredGroups {
+		out = append(out, groups[id].name)
+	}
+	return out
+}
+
+// OfferedPostQuantum names the post-quantum groups among them. A classical
+// result is read against this list: these are what the endpoint declined.
+func OfferedPostQuantum() []string {
+	var out []string
+	for _, id := range offeredGroups {
+		if g := groups[id]; g.postQuantum {
+			out = append(out, g.name)
+		}
+	}
+	return out
 }
 
 // Endpoint probes host:port and reports what the handshake used.
@@ -67,15 +105,14 @@ type Result struct {
 // an endpoint presents, including an expired or self-signed certificate, and
 // refusing to look would hide exactly the inventory that needs attention. The
 // connection carries no data and is closed immediately.
-//
-// The client offers every key exchange group this Go release can perform, the
-// hybrid one included, so a classical result means the endpoint declined a
-// hybrid group that was on the table rather than that nobody asked for one.
 func Endpoint(ctx context.Context, address string) (Result, error) {
 	if _, _, err := net.SplitHostPort(address); err != nil {
 		return Result{}, fmt.Errorf("probe %q: expected host:port", address)
 	}
-	dialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+	dialer := &tls.Dialer{Config: &tls.Config{
+		InsecureSkipVerify: true,
+		CurvePreferences:   offeredGroups,
+	}}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
 		return Result{}, fmt.Errorf("probe %s: %w", address, err)
@@ -87,7 +124,7 @@ func Endpoint(ctx context.Context, address string) (Result, error) {
 
 func fromState(address string, state tls.ConnectionState) Result {
 	at := asset.Location{Host: address}
-	result := Result{Address: address, Version: versionName(state.Version)}
+	result := Result{Address: address, Version: versionName(state.Version), Offered: Offered()}
 	result.Assets = []asset.Asset{
 		{
 			Name:     result.Version,
@@ -106,7 +143,8 @@ func fromState(address string, state tls.ConnectionState) Result {
 			Primitive: asset.KeyAgree,
 			Algorithm: result.Group,
 			Location:  at,
-			Evidence:  fmt.Sprintf("negotiated key exchange group (codepoint 0x%04x)", uint16(state.CurveID)),
+			Evidence: fmt.Sprintf("negotiated key exchange group (codepoint 0x%04x), chosen from %s",
+				uint16(state.CurveID), strings.Join(result.Offered, ", ")),
 		})
 	}
 

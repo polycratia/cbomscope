@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -163,7 +164,7 @@ func cmdProbe(args []string, out io.Writer) error {
 		return writeJSON(out, result)
 	}
 	report(out, result.Assets)
-	reportKeyExchange(out, result)
+	reportHandshake(out, result)
 	return nil
 }
 
@@ -298,21 +299,25 @@ func reportUnread(out io.Writer, modules []scan.Module) {
 	}
 }
 
-// reportKeyExchange says whether the handshake carried post-quantum key
-// exchange. It gets a line of its own because the absence is the finding: every
-// asset in the list above can look individually reasonable while the traffic is
-// being recorded today to be decrypted later.
-func reportKeyExchange(out io.Writer, r probe.Result) {
+// reportHandshake says what the handshake chose to exchange keys with and what
+// authenticated it. The key exchange gets a line of its own because the absence
+// is the finding: every asset in the list above can look individually
+// reasonable while the traffic is being recorded today to be decrypted later.
+func reportHandshake(out io.Writer, r probe.Result) {
 	fmt.Fprintln(out)
 	switch r.KeyExchange {
 	case probe.KeyExchangePostQuantum:
 		fmt.Fprintf(out, "Post-quantum key exchange: %s. What is recorded off this wire today does not rest on a classical assumption alone.\n", r.Group)
 	case probe.KeyExchangeClassical:
-		fmt.Fprintf(out, "No post-quantum key exchange: %s is classical, and the probe offered a hybrid group. Traffic recorded today can be decrypted once a quantum computer exists.\n", r.Group)
+		fmt.Fprintf(out, "No post-quantum key exchange: %s is classical, and %s was offered and declined. Traffic recorded today can be decrypted once a quantum computer exists.\n",
+			r.Group, strings.Join(probe.OfferedPostQuantum(), ", "))
 	case probe.KeyExchangeUnknown:
 		fmt.Fprintf(out, "Key exchange %s is not one this tool has a name for: check the codepoint against the IANA registry rather than reading it as classical.\n", r.Group)
 	default:
 		fmt.Fprintln(out, "The handshake reported no key exchange group, so none of it was post-quantum.")
+	}
+	if r.Signature != "" {
+		fmt.Fprintf(out, "Handshake signature: %s. A signature is forged at the moment it is verified rather than years afterwards, so this one is a deadline, not a leak.\n", r.Signature)
 	}
 }
 

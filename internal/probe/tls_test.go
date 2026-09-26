@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +109,30 @@ func TestEndpointNamesTheGroupAndFlagsAClassicalOne(t *testing.T) {
 	group, ok := find(classical.Assets, func(a asset.Asset) bool { return a.Primitive == asset.KeyAgree })
 	if !ok || !strings.Contains(group.Evidence, "0x001d") {
 		t.Errorf("evidence = %q, want the codepoint a reader can look up", group.Evidence)
+	}
+}
+
+// A classical answer is a finding about the endpoint only if a post-quantum
+// group was on the table when it chose, so what was offered is recorded beside
+// what was negotiated.
+func TestTheProbeRecordsWhatItOffered(t *testing.T) {
+	if len(OfferedPostQuantum()) == 0 {
+		t.Fatal("no post-quantum group is offered, so a classical result says nothing about the endpoint")
+	}
+
+	classical := probeOf(t, testServer(t, func(c *tls.Config) {
+		c.CurvePreferences = []tls.CurveID{tls.X25519}
+	}))
+	if !slices.Contains(classical.Offered, "X25519MLKEM768") {
+		t.Errorf("offered = %v, want the hybrid group among them", classical.Offered)
+	}
+	if !slices.Contains(classical.Offered, classical.Group) {
+		t.Errorf("negotiated %q, which is not in the offered list %v", classical.Group, classical.Offered)
+	}
+
+	group, _ := find(classical.Assets, func(a asset.Asset) bool { return a.Primitive == asset.KeyAgree })
+	if !strings.Contains(group.Evidence, "X25519MLKEM768") {
+		t.Errorf("evidence = %q, want it to name what was declined", group.Evidence)
 	}
 }
 
