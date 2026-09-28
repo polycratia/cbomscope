@@ -19,6 +19,7 @@ import (
 	"github.com/polycratia/cbomscope/internal/asset"
 	"github.com/polycratia/cbomscope/internal/cbom"
 	"github.com/polycratia/cbomscope/internal/classify"
+	"github.com/polycratia/cbomscope/internal/plan"
 	"github.com/polycratia/cbomscope/internal/probe"
 	"github.com/polycratia/cbomscope/internal/scan"
 )
@@ -33,6 +34,10 @@ Usage:
   cbomscope probe <host:port> [-json]
         Handshake with a TLS endpoint and report what it negotiated,
         including whether the key exchange carried anything post-quantum.
+
+  cbomscope plan <dir> [-deps] [-probe <host:port>] [-json]
+        Order the migration work: posture weighed against where an asset can
+        be reached from and how long what it protects stays secret.
 
   cbomscope cbom <dir> [-deps] [-probe <host:port>] [-o <file>]
         Write a CycloneDX 1.6 cryptography bill of materials.
@@ -73,6 +78,8 @@ func run(args []string, out io.Writer) error {
 		return cmdScan(args[1:], out)
 	case "probe":
 		return cmdProbe(args[1:], out)
+	case "plan":
+		return cmdPlan(args[1:], out)
 	case "cbom":
 		return cmdCBOM(args[1:], out)
 	case "table":
@@ -100,6 +107,33 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		positional = append(positional, fs.Arg(0))
 		args = fs.Args()[1:]
 	}
+}
+
+// gather collects the inventory a command works from: the sources under dir,
+// optionally the modules go.mod requires, optionally what an endpoint
+// negotiates.
+func gather(dir string, deps bool, endpoint string, timeout time.Duration) ([]asset.Asset, error) {
+	found, err := scan.Dir(dir)
+	if err != nil {
+		return nil, err
+	}
+	if deps {
+		dependencies, err := scan.Deps(dir)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, dependencies.Assets...)
+	}
+	if endpoint != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		negotiated, err := probe.Endpoint(ctx, endpoint)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, negotiated.Assets...)
+	}
+	return found, nil
 }
 
 func cmdScan(args []string, out io.Writer) error {
@@ -168,6 +202,35 @@ func cmdProbe(args []string, out io.Writer) error {
 	return nil
 }
 
+// cmdPlan orders the work the inventory implies. An inventory answers what is
+// in here; a migration starts from what to do first, and nearly everything a
+// real deployment runs shares the one posture.
+func cmdPlan(args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print the ranking as JSON")
+	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
+	endpoint := fs.String("probe", "", "also probe this host:port and rank what it negotiated")
+	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
+	positional, err := parseArgs(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) != 1 {
+		return fmt.Errorf("plan needs exactly one directory")
+	}
+
+	found, err := gather(positional[0], *deps, *endpoint, *timeout)
+	if err != nil {
+		return err
+	}
+	ranked := plan.Build(classify.ApplyAll(found))
+	if *asJSON {
+		return writeJSON(out, ranked)
+	}
+	reportPlan(out, ranked)
+	return nil
+}
+
 func cmdCBOM(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("cbom", flag.ContinueOnError)
 	endpoint := fs.String("probe", "", "also probe this host:port and include what it negotiated")
@@ -182,25 +245,9 @@ func cmdCBOM(args []string, out io.Writer) error {
 		return fmt.Errorf("cbom needs exactly one directory")
 	}
 
-	found, err := scan.Dir(positional[0])
+	found, err := gather(positional[0], *deps, *endpoint, *timeout)
 	if err != nil {
 		return err
-	}
-	if *deps {
-		dependencies, err := scan.Deps(positional[0])
-		if err != nil {
-			return err
-		}
-		found = append(found, dependencies.Assets...)
-	}
-	if *endpoint != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-		defer cancel()
-		negotiated, err := probe.Endpoint(ctx, *endpoint)
-		if err != nil {
-			return err
-		}
-		found = append(found, negotiated.Assets...)
 	}
 
 	doc := cbom.Build(classify.ApplyAll(found), time.Now())
@@ -287,6 +334,48 @@ func report(out io.Writer, assets []asset.Asset) {
 	fmt.Fprintln(out)
 }
 
+// reportPlan prints the ranking with the arithmetic beside every line and the
+// scale underneath it. A reader who disagrees with an order should be able to
+// recompute it rather than argue with it.
+func reportPlan(out io.Writer, ranked plan.Report) {
+	if len(ranked.Items) == 0 && len(ranked.Settled) == 0 {
+		fmt.Fprintln(out, "No cryptography found. That is a finding too: check that the path is right.")
+		return
+	}
+
+	if len(ranked.Items) == 0 {
+		fmt.Fprintln(out, "Nothing to migrate: every asset found is already settled.")
+	} else {
+		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(tw, "RANK\tSCORE\tASSET\tWHERE\tWHY")
+		for i, item := range ranked.Items {
+			fmt.Fprintf(tw, "%d\t%d\t%s\t%s\t%s\n",
+				i+1, item.Score, item.Asset.Name, item.Asset.Location.String(), item.Arithmetic())
+		}
+		tw.Flush()
+
+		fmt.Fprintf(out, "\n%s\n", ranked.Formula)
+		legend := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		for _, dimension := range plan.Scale {
+			weights := make([]string, 0, len(dimension.Factors))
+			for _, f := range dimension.Factors {
+				weights = append(weights, fmt.Sprintf("%s %d", f.Name, f.Weight))
+			}
+			fmt.Fprintf(legend, "  %s\t%s\n", dimension.Name, strings.Join(weights, ", "))
+		}
+		legend.Flush()
+	}
+
+	if len(ranked.Settled) > 0 {
+		fmt.Fprintf(out, "\n%d asset(s) need no migration and were left out of the ranking:\n", len(ranked.Settled))
+		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		for _, a := range ranked.Settled {
+			fmt.Fprintf(tw, "  %s\t%s\t%s\n", a.Name, a.Posture, a.Location.String())
+		}
+		tw.Flush()
+	}
+}
+
 // reportUnread names the dependencies whose source was not on disk. Leaving
 // them out silently would read exactly like having checked them.
 func reportUnread(out io.Writer, modules []scan.Module) {
@@ -302,7 +391,7 @@ func reportUnread(out io.Writer, modules []scan.Module) {
 // reportHandshake says what the handshake chose to exchange keys with and what
 // authenticated it. The key exchange gets a line of its own because the absence
 // is the finding: every asset in the list above can look individually
-// reasonable while the traffic is being recorded today to be decrypted later.
+// reasonable while the traffic is being recorded today.
 func reportHandshake(out io.Writer, r probe.Result) {
 	fmt.Fprintln(out)
 	switch r.KeyExchange {
