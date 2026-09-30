@@ -166,6 +166,47 @@ answer nobody has would make the gap look checked. Keeping this as data rather
 than as a chain of conditions is the point: the gaps are visible, and closing
 one is a row.
 
+## What to do first
+
+An inventory says what is in here. It does not say where to begin, and the
+posture cannot: `quantum_vulnerable` describes almost every deployment on earth,
+so ranking by posture alone puts the RSA key in a test helper beside the one
+that signs production tokens. What separates those two is where the asset can be
+reached from and how long what it protects has to stay secret.
+
+```console
+$ cbomscope plan . -deps -probe api.example.com:443
+RANK  SCORE  ASSET                   WHERE                                     WHY
+1     18     X25519                  api.example.com:443                       quantum_vulnerable (3) × [live endpoint (3) + key exchange (3)]
+2     12     ECDSA-P-256             api.example.com:443                       quantum_vulnerable (3) × [live endpoint (3) + signature (1)]
+3     12     MD5                     example.com/legacy@v1.4.0/checksum.go:31  broken (4) × [dependency (1) + stored data (2)]
+4     9      RSA-2048                internal/token/sign.go:41                 quantum_vulnerable (3) × [first-party source (2) + signature (1)]
+5     5      TLS_AES_128_GCM_SHA256  api.example.com:443                       quantum_reduced (1) × [live endpoint (3) + stored data (2)]
+6     4      SHA-256                 internal/cbom/cbom.go:137                 quantum_reduced (1) × [first-party source (2) + stored data (2)]
+
+score = posture × (exposure + lifetime)
+  posture   broken 4, quantum_vulnerable 3, unknown 2, quantum_reduced 1
+  exposure  live endpoint 3, first-party source 2, dependency 1
+  lifetime  key exchange 3, stored data 2, signature 1
+
+1 asset(s) need no migration and were left out of the ranking:
+  TLS 1.3  not_applicable  api.example.com:443
+```
+
+Every weight is a row of data in `internal/plan/plan.go`, and every line prints
+the arithmetic that produced its score: an order a reader cannot recompute is an
+opinion, which is the thing this tool exists to replace. `-json` carries the
+same numbers with the reason behind each one attached.
+
+A key exchange outranks a signature of the same posture because the two fail
+differently — traffic recorded off the wire today is decrypted whenever the
+assumption falls, while a signature is forged at the moment it is verified. An
+asset nobody has judged is ranked in the middle rather than last, since an
+unjudged asset put at the bottom reads as a safe one. And the assets that imply
+no work at all — post-quantum, hybrid, or carrying no posture of their own — are
+counted underneath rather than dropped: a report that omits what it checked
+reads exactly like one that never looked.
+
 ## Install
 
 ```bash
@@ -185,6 +226,7 @@ listed rather than implied.
 | Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
 | Dependencies | `-deps` walks what `go.mod` requires, from `vendor/` or the module cache, and attributes each finding to its module |
 | Live probing | TLS: version, cipher suite, key exchange group against the hybrid one the probe offers, certificate key and signature |
+| Ordering | `plan` ranks the inventory by posture, exposure and data lifetime, with the arithmetic beside every line |
 | Output | CycloneDX 1.6 cryptographic assets; the posture, its citation and the module a finding came from travel as `cbomscope:` properties, since the spec has no field for them |
 | Not yet | other languages, certificate and key files on disk, container images, config files, JOSE/JWT algorithms, SSH |
 

@@ -103,6 +103,68 @@ func TestTableCommandShowsEveryRowWithItsSource(t *testing.T) {
 	}
 }
 
+type planFactor struct {
+	Name   string `json:"name"`
+	Weight int    `json:"weight"`
+	Reason string `json:"reason"`
+}
+
+type planReport struct {
+	Formula string `json:"formula"`
+	Items   []struct {
+		Score int `json:"score"`
+		Asset struct {
+			Name string `json:"name"`
+		} `json:"asset"`
+		Posture  planFactor `json:"posture"`
+		Exposure planFactor `json:"exposure"`
+		Lifetime planFactor `json:"lifetime"`
+	} `json:"items"`
+}
+
+// The ranking is the output a reader is meant to argue with, so every line has
+// to carry factors that multiply out to the score beside it.
+func TestPlanRanksWithArithmeticThatChecksOut(t *testing.T) {
+	var buf bytes.Buffer
+	if err := run([]string{"plan", repo, "-json"}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	var ranked planReport
+	if err := json.Unmarshal(buf.Bytes(), &ranked); err != nil {
+		t.Fatalf("output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if ranked.Formula == "" {
+		t.Error("the report does not state the formula its scores come from")
+	}
+	if len(ranked.Items) == 0 {
+		t.Fatal("ranking this repository produced nothing; its SHA-256 use is work")
+	}
+	for i, item := range ranked.Items {
+		if want := item.Posture.Weight * (item.Exposure.Weight + item.Lifetime.Weight); item.Score != want {
+			t.Errorf("%s: score = %d, but its factors multiply out to %d",
+				item.Asset.Name, item.Score, want)
+		}
+		for _, f := range []planFactor{item.Posture, item.Exposure, item.Lifetime} {
+			if f.Name == "" || f.Weight == 0 || f.Reason == "" {
+				t.Errorf("%s: factor %+v carries no name, no weight or no reason", item.Asset.Name, f)
+			}
+		}
+		if i > 0 && ranked.Items[i-1].Score < item.Score {
+			t.Errorf("%s outranks the line above it with a lower score", item.Asset.Name)
+		}
+	}
+
+	buf.Reset()
+	if err := run([]string{"plan", repo}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"RANK", ranked.Formula, "posture", "exposure", "lifetime"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("the printed ranking never mentions %q:\n%s", want, buf.String())
+		}
+	}
+}
+
 // The gate has to be quiet by default or it gets removed from CI on day one.
 func TestGateFailsOnlyOnWhatIsBrokenToday(t *testing.T) {
 	var buf bytes.Buffer
@@ -137,6 +199,8 @@ func TestCommandsValidateTheirArguments(t *testing.T) {
 		{"scan", repo, repo},
 		{"probe"},
 		{"probe", "example.com"}, // no port
+		{"plan"},
+		{"plan", repo, repo},
 		{"cbom"},
 		{"table", repo},
 		{"frobnicate"},
