@@ -31,25 +31,39 @@ Usage:
         Read Go sources and report the cryptography they use.
         -deps also reads the modules go.mod requires.
 
-  cbomscope probe <host:port> [-json]
+  cbomscope probe <host:port> [-json] [-fail-on <posture>]
         Handshake with a TLS endpoint and report what it negotiated,
         including whether the key exchange carried anything post-quantum.
 
-  cbomscope plan <dir> [-deps] [-probe <host:port>] [-json]
+  cbomscope plan <dir> [-deps] [-probe <host:port>] [-json] [-fail-on <posture>]
         Order the migration work: posture weighed against where an asset can
         be reached from and how long what it protects stays secret.
 
-  cbomscope cbom <dir> [-deps] [-probe <host:port>] [-o <file>]
+  cbomscope cbom <dir> [-deps] [-probe <host:port>] [-o <file>] [-fail-on <posture>]
         Write a CycloneDX 1.6 cryptography bill of materials.
 
   cbomscope table [-json]
         Print the classification table every verdict is read from.
 
-Postures: broken, quantum_vulnerable, quantum_reduced, hybrid, quantum_safe,
-not_applicable, unknown.
-By default only "broken" fails the command: it is the one that is already a
-problem today, while quantum_vulnerable describes almost every deployment on
-earth and would make the exit code meaningless.
+Every command that takes an inventory writes it two ways: a table for a person,
+-json for a program. The two carry the same findings, so a gate and a reader
+never disagree about what is in here.
+
+Exit codes:
+  0  the inventory was taken and nothing reached the gate
+  1  the gate was reached: see -fail-on
+  2  the run itself failed — a directory that cannot be read, an endpoint that
+     would not answer, a flag that is not understood
+
+-fail-on names a rung of severity and the gate trips on anything standing at
+least that high: broken, quantum_vulnerable, unknown, quantum_reduced, or none
+to switch it off. The default is broken, the one posture that is already a
+problem today; quantum_vulnerable describes almost every deployment on earth,
+and failing on it out of the box would make the exit code meaningless.
+
+The other postures — hybrid, quantum_safe, not_applicable — imply no work, so
+they are not rungs: a gate set to one of them would fail a build for having
+migrated.
 `
 
 func main() {
@@ -140,13 +154,19 @@ func cmdScan(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print assets as JSON")
 	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
-	failOn := fs.String("fail-on", string(asset.Broken), "posture that makes the command exit 1 (none to disable)")
+	failOn := fs.String("fail-on", string(asset.Broken), gateFlagUsage)
 	positional, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
 	if len(positional) != 1 {
 		return fmt.Errorf("scan needs exactly one directory")
+	}
+	// The gate is read before anything is scanned: a policy nobody can spell
+	// should fail in a second rather than after a walk of every dependency.
+	threshold, err := parseGate(*failOn)
+	if err != nil {
+		return err
 	}
 
 	found, err := scan.Dir(positional[0])
@@ -172,12 +192,13 @@ func cmdScan(args []string, out io.Writer) error {
 		report(out, assets)
 		reportUnread(out, unread)
 	}
-	return gate(assets, *failOn)
+	return gate(out, *asJSON, assets, threshold)
 }
 
 func cmdProbe(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("probe", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "print the handshake as JSON")
+	failOn := fs.String("fail-on", string(asset.Broken), gateFlagUsage)
 	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -185,6 +206,10 @@ func cmdProbe(args []string, out io.Writer) error {
 	}
 	if len(positional) != 1 {
 		return fmt.Errorf("probe needs exactly one host:port")
+	}
+	threshold, err := parseGate(*failOn)
+	if err != nil {
+		return err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -195,11 +220,14 @@ func cmdProbe(args []string, out io.Writer) error {
 	}
 	result.Assets = classify.ApplyAll(result.Assets)
 	if *asJSON {
-		return writeJSON(out, result)
+		if err := writeJSON(out, result); err != nil {
+			return err
+		}
+	} else {
+		report(out, result.Assets)
+		reportHandshake(out, result)
 	}
-	report(out, result.Assets)
-	reportHandshake(out, result)
-	return nil
+	return gate(out, *asJSON, result.Assets, threshold)
 }
 
 // cmdPlan orders the work the inventory implies. An inventory answers what is
@@ -210,6 +238,7 @@ func cmdPlan(args []string, out io.Writer) error {
 	asJSON := fs.Bool("json", false, "print the ranking as JSON")
 	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
 	endpoint := fs.String("probe", "", "also probe this host:port and rank what it negotiated")
+	failOn := fs.String("fail-on", string(asset.Broken), gateFlagUsage)
 	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -218,17 +247,25 @@ func cmdPlan(args []string, out io.Writer) error {
 	if len(positional) != 1 {
 		return fmt.Errorf("plan needs exactly one directory")
 	}
+	threshold, err := parseGate(*failOn)
+	if err != nil {
+		return err
+	}
 
 	found, err := gather(positional[0], *deps, *endpoint, *timeout)
 	if err != nil {
 		return err
 	}
-	ranked := plan.Build(classify.ApplyAll(found))
+	assets := classify.ApplyAll(found)
+	ranked := plan.Build(assets)
 	if *asJSON {
-		return writeJSON(out, ranked)
+		if err := writeJSON(out, ranked); err != nil {
+			return err
+		}
+	} else {
+		reportPlan(out, ranked)
 	}
-	reportPlan(out, ranked)
-	return nil
+	return gate(out, *asJSON, assets, threshold)
 }
 
 func cmdCBOM(args []string, out io.Writer) error {
@@ -236,6 +273,7 @@ func cmdCBOM(args []string, out io.Writer) error {
 	endpoint := fs.String("probe", "", "also probe this host:port and include what it negotiated")
 	deps := fs.Bool("deps", false, "also read the source of the modules go.mod requires")
 	outPath := fs.String("o", "", "write the document here instead of stdout")
+	failOn := fs.String("fail-on", string(asset.Broken), gateFlagUsage)
 	timeout := fs.Duration("timeout", probe.DefaultTimeout, "how long to wait for the handshake")
 	positional, err := parseArgs(fs, args)
 	if err != nil {
@@ -244,22 +282,32 @@ func cmdCBOM(args []string, out io.Writer) error {
 	if len(positional) != 1 {
 		return fmt.Errorf("cbom needs exactly one directory")
 	}
+	threshold, err := parseGate(*failOn)
+	if err != nil {
+		return err
+	}
 
 	found, err := gather(positional[0], *deps, *endpoint, *timeout)
 	if err != nil {
 		return err
 	}
 
-	doc := cbom.Build(classify.ApplyAll(found), time.Now())
+	assets := classify.ApplyAll(found)
+	doc := cbom.Build(assets, time.Now())
 	body, err := doc.Encode()
 	if err != nil {
 		return err
 	}
+	// The document is written before the gate is applied: a run that fails the
+	// build still wants the artifact it just produced.
 	if *outPath == "" {
-		_, err = out.Write(body)
+		if _, err := out.Write(body); err != nil {
+			return err
+		}
+	} else if err := os.WriteFile(*outPath, body, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(*outPath, body, 0o644)
+	return gate(out, *outPath == "", assets, threshold)
 }
 
 // cmdTable prints the classification table itself. A reviewer who wants to
@@ -410,19 +458,90 @@ func reportHandshake(out io.Writer, r probe.Result) {
 	}
 }
 
-func gate(assets []asset.Asset, failOn string) error {
+const gateFlagUsage = "posture the gate trips at, together with everything more serious (none to switch it off)"
+
+// gateLadder is severity, worst first. -fail-on names one rung and the gate
+// trips on anything standing at least that high, so the flag expresses a policy
+// rather than a single posture.
+//
+// unknown stands above quantum_reduced for the same reason the ranking puts it
+// in the middle: an unjudged asset placed below a judged one reads as a safe
+// one. The postures that are absent — hybrid, quantum_safe, not_applicable —
+// imply no work at all, so a gate set to one of them would fail a build for
+// having migrated.
+var gateLadder = []asset.Posture{
+	asset.Broken,
+	asset.QuantumVulnerable,
+	asset.PostureUnknown,
+	asset.QuantumReduced,
+}
+
+// parseGate reads -fail-on into the rung it names. An empty posture back means
+// the gate is switched off.
+func parseGate(failOn string) (asset.Posture, error) {
 	if failOn == "" || failOn == "none" {
+		return "", nil
+	}
+	posture := asset.Posture(failOn)
+	if slices.Contains(gateLadder, posture) {
+		return posture, nil
+	}
+	if slices.Contains(order, posture) {
+		return "", fmt.Errorf("-fail-on %q implies no migration work, so nothing can stand above it; the gate reads %s, or none",
+			failOn, rungs())
+	}
+	return "", fmt.Errorf("-fail-on %q is not a posture; the gate reads %s, or none", failOn, rungs())
+}
+
+// tripped is every asset standing at or above the threshold.
+func tripped(assets []asset.Asset, threshold asset.Posture) []asset.Asset {
+	if threshold == "" {
 		return nil
 	}
-	if !slices.Contains(order, asset.Posture(failOn)) {
-		return fmt.Errorf("-fail-on %q is not a posture; expected one of %v", failOn, order)
-	}
+	limit := slices.Index(gateLadder, threshold)
+	var over []asset.Asset
 	for _, a := range assets {
-		if string(a.Posture) == failOn {
-			return exitCode(1)
+		if rung := slices.Index(gateLadder, a.Posture); rung >= 0 && rung <= limit {
+			over = append(over, a)
 		}
 	}
-	return nil
+	return over
+}
+
+// gate is the exit code policy: 1 when something reached the threshold, 0 when
+// nothing did. It names what it caught where a person is reading and writes
+// nothing where the output is a document, since prose appended to JSON breaks
+// every reader of it.
+func gate(out io.Writer, machineOutput bool, assets []asset.Asset, threshold asset.Posture) error {
+	over := tripped(assets, threshold)
+	if len(over) == 0 {
+		// Silent on a clean run too: a gate that talks when it has nothing to say
+		// is a gate somebody switches off, and then it catches nothing.
+		return nil
+	}
+	if !machineOutput {
+		counts := map[asset.Posture]int{}
+		for _, a := range over {
+			counts[a.Posture]++
+		}
+		fmt.Fprintf(out, "\n%d asset(s) at %s or worse, which -fail-on %s makes an error:",
+			len(over), threshold, threshold)
+		for _, posture := range gateLadder {
+			if counts[posture] > 0 {
+				fmt.Fprintf(out, " %s=%d", posture, counts[posture])
+			}
+		}
+		fmt.Fprintln(out)
+	}
+	return exitCode(1)
+}
+
+func rungs() string {
+	names := make([]string, 0, len(gateLadder))
+	for _, posture := range gateLadder {
+		names = append(names, string(posture))
+	}
+	return strings.Join(names, ", ")
 }
 
 func writeJSON(out io.Writer, v any) error {
