@@ -47,7 +47,10 @@ Usage:
 
 Every command that takes an inventory writes it two ways: a table for a person,
 -json for a program. The two carry the same findings, so a gate and a reader
-never disagree about what is in here.
+never disagree about what is in here. Whatever is not inventory — the gate's
+verdict, a dependency whose source was not on disk — goes to stderr wherever
+stdout carries a document, since prose appended to JSON breaks every reader of
+it, and a run that exits 1 with no reason anywhere is a gate somebody deletes.
 
 Exit codes:
   0  the inventory was taken and nothing reached the gate
@@ -81,6 +84,10 @@ func main() {
 type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+
+// diagnostics is where a note goes when stdout is carrying a document. Keeping
+// the two apart is what lets one run answer a person and a program at once.
+var diagnostics io.Writer = os.Stderr
 
 func run(args []string, out io.Writer) error {
 	if len(args) == 0 {
@@ -125,29 +132,33 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 
 // gather collects the inventory a command works from: the sources under dir,
 // optionally the modules go.mod requires, optionally what an endpoint
-// negotiates.
-func gather(dir string, deps bool, endpoint string, timeout time.Duration) ([]asset.Asset, error) {
+// negotiates. The modules whose source was not on disk come back beside the
+// findings, because an inventory that silently skips one reads exactly like an
+// inventory that checked it.
+func gather(dir string, deps bool, endpoint string, timeout time.Duration) ([]asset.Asset, []scan.Module, error) {
 	found, err := scan.Dir(dir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var unread []scan.Module
 	if deps {
 		dependencies, err := scan.Deps(dir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		found = append(found, dependencies.Assets...)
+		unread = dependencies.Missing
 	}
 	if endpoint != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		negotiated, err := probe.Endpoint(ctx, endpoint)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		found = append(found, negotiated.Assets...)
 	}
-	return found, nil
+	return found, unread, nil
 }
 
 func cmdScan(args []string, out io.Writer) error {
@@ -169,18 +180,9 @@ func cmdScan(args []string, out io.Writer) error {
 		return err
 	}
 
-	found, err := scan.Dir(positional[0])
+	found, unread, err := gather(positional[0], *deps, "", 0)
 	if err != nil {
 		return err
-	}
-	var unread []scan.Module
-	if *deps {
-		dependencies, err := scan.Deps(positional[0])
-		if err != nil {
-			return err
-		}
-		found = append(found, dependencies.Assets...)
-		unread = dependencies.Missing
 	}
 
 	assets := classify.ApplyAll(found)
@@ -190,8 +192,8 @@ func cmdScan(args []string, out io.Writer) error {
 		}
 	} else {
 		report(out, assets)
-		reportUnread(out, unread)
 	}
+	reportUnread(out, *asJSON, unread)
 	return gate(out, *asJSON, assets, threshold)
 }
 
@@ -252,7 +254,7 @@ func cmdPlan(args []string, out io.Writer) error {
 		return err
 	}
 
-	found, err := gather(positional[0], *deps, *endpoint, *timeout)
+	found, unread, err := gather(positional[0], *deps, *endpoint, *timeout)
 	if err != nil {
 		return err
 	}
@@ -265,6 +267,7 @@ func cmdPlan(args []string, out io.Writer) error {
 	} else {
 		reportPlan(out, ranked)
 	}
+	reportUnread(out, *asJSON, unread)
 	return gate(out, *asJSON, assets, threshold)
 }
 
@@ -287,7 +290,7 @@ func cmdCBOM(args []string, out io.Writer) error {
 		return err
 	}
 
-	found, err := gather(positional[0], *deps, *endpoint, *timeout)
+	found, unread, err := gather(positional[0], *deps, *endpoint, *timeout)
 	if err != nil {
 		return err
 	}
@@ -300,14 +303,16 @@ func cmdCBOM(args []string, out io.Writer) error {
 	}
 	// The document is written before the gate is applied: a run that fails the
 	// build still wants the artifact it just produced.
-	if *outPath == "" {
+	documentOnStdout := *outPath == ""
+	if documentOnStdout {
 		if _, err := out.Write(body); err != nil {
 			return err
 		}
 	} else if err := os.WriteFile(*outPath, body, 0o644); err != nil {
 		return err
 	}
-	return gate(out, *outPath == "", assets, threshold)
+	reportUnread(out, documentOnStdout, unread)
+	return gate(out, documentOnStdout, assets, threshold)
 }
 
 // cmdTable prints the classification table itself. A reviewer who wants to
@@ -425,14 +430,21 @@ func reportPlan(out io.Writer, ranked plan.Report) {
 }
 
 // reportUnread names the dependencies whose source was not on disk. Leaving
-// them out silently would read exactly like having checked them.
-func reportUnread(out io.Writer, modules []scan.Module) {
+// them out silently would read exactly like having checked them, so the note is
+// written in both modes — beside the table for a person, on stderr where stdout
+// is a document.
+func reportUnread(out io.Writer, machineOutput bool, modules []scan.Module) {
 	if len(modules) == 0 {
 		return
 	}
-	fmt.Fprintf(out, "\n%d module(s) required by go.mod were not read; run `go mod download` to include them:\n", len(modules))
+	w, lead := out, "\n"
+	if machineOutput {
+		w, lead = diagnostics, ""
+	}
+	fmt.Fprintf(w, "%s%d module(s) required by go.mod were not read; run `go mod download` to include them:\n",
+		lead, len(modules))
 	for _, m := range modules {
-		fmt.Fprintln(out, "  "+m.Coordinate())
+		fmt.Fprintln(w, "  "+m.Coordinate())
 	}
 }
 
@@ -509,9 +521,10 @@ func tripped(assets []asset.Asset, threshold asset.Posture) []asset.Asset {
 }
 
 // gate is the exit code policy: 1 when something reached the threshold, 0 when
-// nothing did. It names what it caught where a person is reading and writes
-// nothing where the output is a document, since prose appended to JSON breaks
-// every reader of it.
+// nothing did. It says what it caught beside the table a person is reading, and
+// on stderr where stdout carries a document — prose appended to JSON breaks
+// every reader of it, and an exit code with no reason anywhere is one nobody
+// can act on.
 func gate(out io.Writer, machineOutput bool, assets []asset.Asset, threshold asset.Posture) error {
 	over := tripped(assets, threshold)
 	if len(over) == 0 {
@@ -519,21 +532,30 @@ func gate(out io.Writer, machineOutput bool, assets []asset.Asset, threshold ass
 		// is a gate somebody switches off, and then it catches nothing.
 		return nil
 	}
-	if !machineOutput {
-		counts := map[asset.Posture]int{}
-		for _, a := range over {
-			counts[a.Posture]++
-		}
-		fmt.Fprintf(out, "\n%d asset(s) at %s or worse, which -fail-on %s makes an error:",
-			len(over), threshold, threshold)
-		for _, posture := range gateLadder {
-			if counts[posture] > 0 {
-				fmt.Fprintf(out, " %s=%d", posture, counts[posture])
-			}
-		}
-		fmt.Fprintln(out)
+	if machineOutput {
+		fmt.Fprintln(diagnostics, gateSummary(over, threshold))
+	} else {
+		fmt.Fprintf(out, "\n%s\n", gateSummary(over, threshold))
 	}
 	return exitCode(1)
+}
+
+// gateSummary is the verdict in one line: how many assets reached the rung, and
+// which postures they stand at.
+func gateSummary(over []asset.Asset, threshold asset.Posture) string {
+	counts := map[asset.Posture]int{}
+	for _, a := range over {
+		counts[a.Posture]++
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d asset(s) at %s or worse, which -fail-on %s makes an error:",
+		len(over), threshold, threshold)
+	for _, posture := range gateLadder {
+		if counts[posture] > 0 {
+			fmt.Fprintf(&b, " %s=%d", posture, counts[posture])
+		}
+	}
+	return b.String()
 }
 
 func rungs() string {

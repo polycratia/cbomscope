@@ -121,11 +121,52 @@ the family is reported with no digest at all.
 
 Only `broken` fails the command by default. `quantum_vulnerable` describes
 almost every deployment on earth right now; making it an error would turn the
-exit code into noise on the first run and get the tool removed from CI. Use
-`-fail-on` to choose a different gate.
+exit code into noise on the first run. Use `-fail-on` to choose a different
+gate.
 
 None of this predicts when a cryptographically relevant quantum computer
 arrives. It says what would fall if one did.
+
+## One run, three readers
+
+Every command that takes an inventory prints a table for a person and `-json`
+for a program, from the same findings, so a gate and a reader never disagree
+about what is in here. The exit code is the third reading:
+
+| Code | Meaning |
+|---|---|
+| `0` | the inventory was taken and nothing reached the gate |
+| `1` | the gate was reached — see `-fail-on` |
+| `2` | the run itself failed: a directory that cannot be read, an endpoint that would not answer, a flag that is not understood |
+
+```console
+$ cbomscope scan . -deps -fail-on quantum_vulnerable
+POSTURE             ASSET     WHERE                      WHY
+quantum_vulnerable  RSA-2048  internal/token/sign.go:41  Shor's algorithm solves the underlying factoring
+quantum_reduced     SHA-256   internal/cbom/cbom.go:137  256-bit digest: quantum collision search reduces the margin; SHA-384 or larger is the usual answer
+
+2 asset(s): quantum_vulnerable=1 quantum_reduced=1
+
+1 asset(s) at quantum_vulnerable or worse, which -fail-on quantum_vulnerable makes an error: quantum_vulnerable=1
+$ echo $?
+1
+```
+
+`-fail-on` names one rung of severity — `broken`, `quantum_vulnerable`,
+`unknown`, `quantum_reduced`, or `none` to switch it off — and the gate trips on
+everything standing at least that high. A pipeline states a policy that way
+rather than enumerating the postures it is afraid of and missing the next one
+that gets added. `unknown` stands above `quantum_reduced` for the same reason
+the ranking puts it in the middle: an unjudged asset placed below a judged one
+reads as a safe one. The postures that imply no work are not rungs at all — a
+gate set to `quantum_safe` would fail a build for having migrated.
+
+Wherever stdout carries a document, whatever is not inventory is written to
+stderr instead: the gate's verdict, and any dependency whose source was not on
+disk. Prose appended to JSON breaks every reader of it, and an exit code with no
+reason anywhere is one nobody can act on. The artifact comes first in either
+case — `cbom -o cbom.json` writes the document and then applies the gate, since
+a run that fails the build still wants the file it just produced.
 
 ## Where a verdict comes from
 
@@ -228,6 +269,7 @@ listed rather than implied.
 | Live probing | TLS: version, cipher suite, key exchange group against the hybrid one the probe offers, certificate key and signature |
 | Ordering | `plan` ranks the inventory by posture, exposure and data lifetime, with the arithmetic beside every line |
 | Output | CycloneDX 1.6 cryptographic assets; the posture, its citation and the module a finding came from travel as `cbomscope:` properties, since the spec has no field for them |
+| Gate | `-fail-on` names a rung of severity; exit 1 when anything stands at or above it, exit 2 when the run itself failed |
 | Not yet | other languages, certificate and key files on disk, container images, config files, JOSE/JWT algorithms, SSH |
 
 ## Alongside CBOMkit
