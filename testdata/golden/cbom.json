@@ -1,0 +1,246 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-01-01T00:00:00Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "cbomscope"
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "RSA-2048",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "pke",
+          "parameterSetIdentifier": "2048",
+          "classicalSecurityLevel": 112
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "quantum_vulnerable"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "Shor's algorithm solves the underlying factoring"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "Shor 1997, SIAM J. Comput. 26(5): polynomial-time factoring and discrete logarithms; NIST IR 8547: transition to post-quantum cryptography standards"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "internal/token/sign.go:41"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "MD5",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "hash"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "broken"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "collisions are practical; unusable for signatures or integrity"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "RFC 6151: MD5 and HMAC-MD5 security considerations"
+        },
+        {
+          "name": "cbomscope:module",
+          "value": "example.com/legacy@v1.4.0"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "example.com/legacy@v1.4.0/checksum.go:31"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "TLS_AES_256_GCM_SHA384",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "ae",
+          "parameterSetIdentifier": "256",
+          "mode": "gcm",
+          "classicalSecurityLevel": 256,
+          "nistQuantumSecurityLevel": 5
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "quantum_safe"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "Grover leaves about 128 bits of quantum work"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "Grover 1996, STOC: a quadratic speedup for unstructured search; NIST IR 8547: transition to post-quantum cryptography standards"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "api.example.com:443"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "SHA-256",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "hash",
+          "nistQuantumSecurityLevel": 2
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "quantum_reduced"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "256-bit digest: quantum collision search reduces the margin; SHA-384 or larger is the usual answer"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "Brassard, Hoyer and Tapp 1998, LATIN: quantum collision search in about 2^(n/3)"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "internal/cbom/cbom.go:137"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "X25519MLKEM768",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "key-agree"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "hybrid"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "classical and post-quantum key exchange combined: secure if either half holds"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "draft-ietf-tls-hybrid-design: hybrid key exchange in TLS 1.3"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "api.example.com:443"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "TLS 1.3",
+      "cryptoProperties": {
+        "assetType": "protocol"
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "not_applicable"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "a protocol version has no quantum posture of its own: see the key exchange and cipher it negotiated"
+        },
+        {
+          "name": "cbomscope:citation",
+          "value": "RFC 8446: TLS 1.3"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "api.example.com:443"
+          }
+        ]
+      }
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto:0000000000000000",
+      "name": "Serpent",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "block-cipher"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbomscope:posture",
+          "value": "unknown"
+        },
+        {
+          "name": "cbomscope:rationale",
+          "value": "not in the classification table: judge this one by hand"
+        }
+      ],
+      "evidence": {
+        "occurrences": [
+          {
+            "location": "internal/legacy/cipher.go:12"
+          }
+        ]
+      }
+    }
+  ]
+}
