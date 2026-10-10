@@ -10,6 +10,41 @@ are chosen by a TLS handshake nobody has looked at.
 cbomscope reads both sides and writes the answer as a CycloneDX 1.6 cryptography
 bill of materials.
 
+## What a CBOM is for
+
+A cryptography bill of materials is a list, not a verdict: the algorithms,
+protocols and keys a program uses, each one with the place it was found and what
+is known about it. It answers the questions a migration opens with — where is
+RSA, which of it is ours, what does this endpoint actually negotiate — before
+anybody argues about what to change.
+
+It is a document rather than a dashboard, for the same reason an SBOM is one. It
+carries a timestamp, it can be attached to a release, and two of them can be
+diffed to show what moved. Cryptographic assets are CycloneDX components, so the
+file travels through tooling that already exists.
+
+## Inventory, not a scanner
+
+cbomscope reports what is in use. It does not grade it: no CVEs, no severity
+score, no claim that a finding is a vulnerability. A posture says what a quantum
+computer would do to an algorithm, which is a property of the algorithm and not
+of the code around it — the RSA key in a test helper and the one signing
+production tokens carry the same posture, and separating those two is what
+`plan` is for.
+
+No key material is ever read. The scanner parses Go syntax and never runs the
+code it reads; the probe completes a handshake and reports what the handshake
+said, sending no application data; nothing else on disk is opened but Go sources
+and `go.mod`. Private keys, keystores, certificate files, `.env` files and
+anything else holding a secret are outside what this tool looks at, so an
+inventory can be taken on a laptop or against production with the same knowledge
+of what it touched.
+
+Nor does it judge how the cryptography is used. A sound algorithm with a reused
+nonce, an IV that restarts from zero, a key committed to the repository — those
+are real findings, and none of them are these. An inventory is what you have
+before a review, not the review.
+
 ## Two sources, because they disagree
 
 ```console
@@ -92,7 +127,7 @@ the one unforgivable answer.
 
 The probe skips certificate verification on purpose: the job is to see what an
 endpoint presents, and an expired or self-signed certificate is exactly the
-inventory that needs attention. The connection carries no data.
+inventory that needs attention.
 
 The groups it offers are written out in the source, hybrid first, rather than
 left to whatever the standard library defaults to that release. It is what makes
