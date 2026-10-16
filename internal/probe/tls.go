@@ -25,6 +25,16 @@ import (
 // is reported as unreachable rather than held onto.
 const DefaultTimeout = 10 * time.Second
 
+// MinimumVersion is the oldest protocol version the probe will negotiate.
+// Refusing TLS 1.0 would report the deployment that still speaks it as
+// unreachable, which reads the same as an endpoint that is not there — and that
+// is the deployment an inventory is taken for.
+const MinimumVersion = tls.VersionTLS10
+
+// KeyTransport is what Result.Group reads when the negotiated suite has no
+// group to negotiate at all.
+const KeyTransport = "RSA key transport"
+
 // KeyExchange is the reading of the negotiated group, in four states rather
 // than two: a group nobody recognised is not evidence of a classical one, and a
 // handshake that reported no group at all is a third thing again.
@@ -50,8 +60,9 @@ const (
 type Result struct {
 	Address string `json:"address"`
 	Version string `json:"version"`
-	// Group is the negotiated key exchange group, empty when the handshake
-	// reported none.
+	// Group is the negotiated key exchange group, or KeyTransport where the
+	// suite negotiated none and encrypted to the certificate key instead. It is
+	// empty only when the handshake reported neither.
 	Group       string      `json:"group,omitempty"`
 	KeyExchange KeyExchange `json:"key_exchange"`
 	// Offered are the groups the probe put on the table. Without them a
@@ -78,6 +89,48 @@ var offeredGroups = []tls.CurveID{
 	tls.CurveP521,
 }
 
+// offeredSuites is what the probe offers for TLS 1.2 and below, written out for
+// the same reason as the groups and in order of preference.
+//
+// The weak half of the list is deliberate. A client offering only the suites a
+// sound deployment would choose cannot complete a handshake with an unsound
+// one, so an endpoint still speaking RSA key transport, CBC, 3DES or RC4 would
+// be reported as unreachable rather than inventoried — and that is the endpoint
+// whose cryptography a reader most needs named. The standard library leaves
+// these out of its defaults, which is right for a client carrying data and
+// wrong for one carrying none.
+var offeredSuites = []uint16{
+	// Forward-secret AEAD: what a current deployment should reach for.
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+
+	// Forward secrecy without an AEAD.
+	tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+	tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+
+	// RSA key transport: no group, and no forward secrecy.
+	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
+	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+
+	// Broken today, and in deployment anyway.
+	tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+	tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+	tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
+	tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+	tls.TLS_RSA_WITH_RC4_128_SHA,
+}
+
 // Offered names every key exchange group the probe puts on the table.
 func Offered() []string {
 	out := make([]string, 0, len(offeredGroups))
@@ -99,6 +152,17 @@ func OfferedPostQuantum() []string {
 	return out
 }
 
+// OfferedSuites names every cipher suite the probe offers for TLS 1.2 and
+// below. The TLS 1.3 suites are not listed because they are not negotiable:
+// that version has its own three, and all of them are AEAD.
+func OfferedSuites() []string {
+	out := make([]string, 0, len(offeredSuites))
+	for _, id := range offeredSuites {
+		out = append(out, tls.CipherSuiteName(id))
+	}
+	return out
+}
+
 // Endpoint probes host:port and reports what the handshake used.
 //
 // Certificate verification is deliberately switched off: the job is to see what
@@ -111,7 +175,9 @@ func Endpoint(ctx context.Context, address string) (Result, error) {
 	}
 	dialer := &tls.Dialer{Config: &tls.Config{
 		InsecureSkipVerify: true,
+		MinVersion:         MinimumVersion,
 		CurvePreferences:   offeredGroups,
+		CipherSuites:       offeredSuites,
 	}}
 	conn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -146,6 +212,9 @@ func fromState(address string, state tls.ConnectionState) Result {
 			Evidence: fmt.Sprintf("negotiated key exchange group (codepoint 0x%04x), chosen from %s",
 				uint16(state.CurveID), strings.Join(result.Offered, ", ")),
 		})
+	} else if transport, ok := keyTransportAsset(state.CipherSuite, state.PeerCertificates, at); ok {
+		result.Group, result.KeyExchange = KeyTransport, KeyExchangeClassical
+		result.Assets = append(result.Assets, transport)
 	}
 
 	if len(state.PeerCertificates) > 0 {
@@ -202,6 +271,34 @@ func keyExchange(id tls.CurveID) (string, KeyExchange) {
 		return g.name, KeyExchangeClassical
 	}
 	return fmt.Sprintf("key exchange group 0x%04x", uint16(id)), KeyExchangeUnknown
+}
+
+// keyTransportAsset reports the key exchange of a TLS_RSA_ suite, which has no
+// group to report: the client encrypts the premaster secret to the public key
+// in the certificate, and everything recorded off that wire is readable by
+// whoever factors that modulus. Without this row such a handshake would be
+// inventoried as having no key exchange at all, which is the one reading worse
+// than naming RSA.
+func keyTransportAsset(suite uint16, chain []*x509.Certificate, at asset.Location) (asset.Asset, bool) {
+	name := tls.CipherSuiteName(suite)
+	if !strings.HasPrefix(name, "TLS_RSA_") {
+		return asset.Asset{}, false
+	}
+	a := asset.Asset{
+		Name:      KeyTransport,
+		Kind:      asset.Algorithm,
+		Primitive: asset.PKE,
+		Algorithm: "RSA",
+		Location:  at,
+		Evidence: "key exchange of negotiated cipher suite " + name +
+			": no group is negotiated, the premaster secret is encrypted to the certificate key",
+	}
+	if len(chain) > 0 {
+		if pub, ok := chain[0].PublicKey.(*rsa.PublicKey); ok {
+			a.KeySize = pub.N.BitLen()
+		}
+	}
+	return a, true
 }
 
 // signatureAsset describes the signature that authenticated the handshake.
@@ -275,6 +372,11 @@ func cipherAsset(suite uint16, at asset.Location) asset.Asset {
 		a.Algorithm, a.KeySize = "AES", 128
 	case strings.Contains(name, "CHACHA20"):
 		a.Algorithm, a.KeySize, a.Primitive = "ChaCha20-Poly1305", 256, asset.AE
+	case strings.Contains(name, "3DES"):
+		// Three-key EDE: 168 bits of key, and the 64-bit block Sweet32 attacks.
+		a.Algorithm, a.KeySize = "3DES", 168
+	case strings.Contains(name, "RC4"):
+		a.Algorithm, a.KeySize, a.Primitive = "RC4", 128, asset.StreamCipher
 	default:
 		a.Algorithm = name
 	}

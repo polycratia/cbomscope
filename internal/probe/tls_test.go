@@ -198,6 +198,117 @@ func TestEndpointReadsAnOlderDeployment(t *testing.T) {
 	}
 }
 
+// A client that offers only what a sound deployment would choose cannot
+// handshake with an unsound one, and reports it as unreachable — which reads
+// exactly like an endpoint that is not there.
+func TestTheProbeOffersWhatAWeakEndpointWouldChoose(t *testing.T) {
+	if MinimumVersion != tls.VersionTLS10 {
+		t.Errorf("minimum version = %s, want TLS 1.0", versionName(MinimumVersion))
+	}
+	for _, want := range []struct {
+		suite  uint16
+		family string
+	}{
+		{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, "forward-secret AEAD"},
+		{tls.TLS_RSA_WITH_AES_128_CBC_SHA, "RSA key transport with CBC"},
+		{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA, "3DES"},
+		{tls.TLS_RSA_WITH_RC4_128_SHA, "RC4"},
+	} {
+		if !slices.Contains(offeredSuites, want.suite) {
+			t.Errorf("no %s suite is offered: an endpoint that speaks only that is refused rather than inventoried",
+				want.family)
+		}
+	}
+	if len(OfferedSuites()) != len(offeredSuites) {
+		t.Errorf("OfferedSuites names %d of the %d suites offered", len(OfferedSuites()), len(offeredSuites))
+	}
+}
+
+// The suite name is the only place a handshake states the cipher, so 3DES and
+// RC4 are read out of it like AES is.
+func TestTheSuiteNameNamesTheCipher(t *testing.T) {
+	for _, c := range []struct {
+		suite     uint16
+		algorithm string
+		keySize   int
+		primitive asset.Primitive
+		mode      asset.Mode
+	}{
+		{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA, "3DES", 168, asset.BlockCipher, asset.CBC},
+		{tls.TLS_RSA_WITH_RC4_128_SHA, "RC4", 128, asset.StreamCipher, ""},
+		{tls.TLS_RSA_WITH_AES_128_CBC_SHA, "AES", 128, asset.BlockCipher, asset.CBC},
+	} {
+		got := cipherAsset(c.suite, asset.Location{})
+		if got.Algorithm != c.algorithm || got.KeySize != c.keySize {
+			t.Errorf("%s = %q/%d, want %s/%d", got.Name, got.Algorithm, got.KeySize, c.algorithm, c.keySize)
+		}
+		if got.Primitive != c.primitive || got.Mode != c.mode {
+			t.Errorf("%s = %s/%s, want %s/%s", got.Name, got.Primitive, got.Mode, c.primitive, c.mode)
+		}
+	}
+	if _, ok := keyTransportAsset(tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, nil, asset.Location{}); ok {
+		t.Error("an ECDHE suite was reported as RSA key transport")
+	}
+}
+
+// A weak endpoint has to be inventoried rather than refused, and a suite with
+// no forward secrecy carries a key exchange of its own: TLS_RSA_ negotiates no
+// group, and reporting no key exchange at all is worse than naming RSA.
+func TestEndpointInventoriesAWeakDeployment(t *testing.T) {
+	inventoried := 0
+	for _, c := range []struct {
+		suite     uint16
+		algorithm string
+	}{
+		{tls.TLS_RSA_WITH_AES_128_CBC_SHA, "AES"},
+		{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA, "3DES"},
+		{tls.TLS_RSA_WITH_RC4_128_SHA, "RC4"},
+	} {
+		name := tls.CipherSuiteName(c.suite)
+		t.Run(name, func(t *testing.T) {
+			address := testServer(t, func(s *tls.Config) {
+				s.MinVersion, s.MaxVersion = tls.VersionTLS12, tls.VersionTLS12
+				s.CipherSuites = []uint16{c.suite}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := Endpoint(ctx, address)
+			if err != nil {
+				// A suite this Go release will not serve either says nothing
+				// about what the probe offers.
+				t.Skipf("the in-process server would not negotiate %s: %v", name, err)
+			}
+			inventoried++
+
+			cipher, ok := find(result.Assets, func(a asset.Asset) bool { return a.Algorithm == c.algorithm })
+			if !ok {
+				t.Fatalf("no %s asset; got %+v", c.algorithm, result.Assets)
+			}
+			if cipher.KeySize == 0 || !strings.Contains(cipher.Evidence, name) {
+				t.Errorf("%s = %+v, want a key size and the suite it was read from", c.algorithm, cipher)
+			}
+
+			transport, ok := find(result.Assets, func(a asset.Asset) bool { return a.Primitive == asset.PKE })
+			if !ok {
+				t.Fatalf("a TLS_RSA_ handshake reported no key exchange at all; got %+v", result.Assets)
+			}
+			if transport.Algorithm != "RSA" || transport.KeySize == 0 {
+				t.Errorf("key transport = %+v, want RSA with the modulus size of the certificate key", transport)
+			}
+			if !strings.Contains(transport.Evidence, name) {
+				t.Errorf("evidence = %q, want it to name the suite the reading came from", transport.Evidence)
+			}
+			if result.Group != KeyTransport || result.KeyExchange != KeyExchangeClassical {
+				t.Errorf("key exchange = %q/%s, want %q read as classical",
+					result.Group, result.KeyExchange, KeyTransport)
+			}
+		})
+	}
+	if inventoried == 0 {
+		t.Error("not one weak suite could be handshaked; the probe offers nothing such an endpoint would choose")
+	}
+}
+
 func TestEndpointRejectsAnAddressWithoutAPort(t *testing.T) {
 	_, err := Endpoint(context.Background(), "example.com")
 	if err == nil || !strings.Contains(err.Error(), "host:port") {

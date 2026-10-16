@@ -21,15 +21,16 @@ const (
 type Primitive string
 
 const (
-	PKE         Primitive = "pke"       // public-key encryption
-	Signature   Primitive = "signature" //
-	KEM         Primitive = "kem"       // key encapsulation
-	KeyAgree    Primitive = "key-agree" //
-	BlockCipher Primitive = "block-cipher"
-	AE          Primitive = "ae" // authenticated encryption
-	Hash        Primitive = "hash"
-	MAC         Primitive = "mac"
-	Unknown     Primitive = "unknown"
+	PKE          Primitive = "pke"       // public-key encryption
+	Signature    Primitive = "signature" //
+	KEM          Primitive = "kem"       // key encapsulation
+	KeyAgree     Primitive = "key-agree" //
+	BlockCipher  Primitive = "block-cipher"
+	StreamCipher Primitive = "stream-cipher"
+	AE           Primitive = "ae" // authenticated encryption
+	Hash         Primitive = "hash"
+	MAC          Primitive = "mac"
+	Unknown      Primitive = "unknown"
 )
 
 // Mode is a mode of operation, named the way CycloneDX names it.
