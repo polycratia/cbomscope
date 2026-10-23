@@ -136,6 +136,17 @@ hybrid group that was on the table, not one nobody asked. The offered list
 travels with the answer, in `-json` as `offered` and as evidence on the group
 itself.
 
+The cipher suites are written out the same way, and the list runs past what a
+sound deployment would choose: RSA key transport, CBC, 3DES, RC4, down to
+TLS 1.0. A client offering only sound suites cannot complete a handshake with an
+unsound endpoint, so the deployment whose cryptography most needs naming would
+be reported as unreachable — which reads exactly like an endpoint that is not
+there. The suite name is the only place a handshake states the cipher, so 3DES
+and RC4 are read out of it as AES is; and where a `TLS_RSA_` suite negotiates no
+group at all, the key exchange is reported as RSA at the modulus size of the
+certificate key, since reporting no key exchange is the one reading worse than
+naming RSA.
+
 The signature is reported only as far as the handshake pins it. Go does not
 expose the scheme the peer signed with, so it is read off what constrains that
 choice — in TLS 1.3 an ECDSA P-256 key can sign nothing but
@@ -301,7 +312,7 @@ listed rather than implied.
 |---|---|
 | Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
 | Dependencies | `-deps` walks what `go.mod` requires, from `vendor/` or the module cache, and attributes each finding to its module |
-| Live probing | TLS: version, cipher suite, key exchange group against the hybrid one the probe offers, certificate key and signature |
+| Live probing | TLS 1.0 and up: version, cipher suite down to 3DES and RC4, key exchange group against the hybrid one the probe offers, RSA key transport where a suite negotiates no group, certificate key and signature |
 | Ordering | `plan` ranks the inventory by posture, exposure and data lifetime, with the arithmetic beside every line |
 | Output | CycloneDX 1.6 cryptographic assets; the posture, its citation and the module a finding came from travel as `cbomscope:` properties, since the spec has no field for them |
 | Gate | `-fail-on` names a rung of severity; exit 1 when anything stands at or above it, exit 2 when the run itself failed |
