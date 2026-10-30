@@ -3,16 +3,17 @@ package scan
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/polycratia/cbomscope/internal/asset"
 )
 
-// fixture copies the stored source text into a real .go file, since the scanner
-// walks directories looking for that extension.
-func fixture(t *testing.T) string {
+// fixture copies one of the stored source texts into a real .go file, since the
+// scanner walks directories looking for that extension.
+func fixture(t *testing.T, name string) string {
 	t.Helper()
-	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sample", "crypto.go.txt"))
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "sample", name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +22,15 @@ func fixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func scanFixture(t *testing.T, name string) map[string]asset.Asset {
+	t.Helper()
+	found, err := Dir(fixture(t, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return byName(found)
 }
 
 func byName(assets []asset.Asset) map[string]asset.Asset {
@@ -32,11 +42,7 @@ func byName(assets []asset.Asset) map[string]asset.Asset {
 }
 
 func TestDirReadsParametersOutOfTheCall(t *testing.T) {
-	found, err := Dir(fixture(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	index := byName(found)
+	index := scanFixture(t, "crypto.go.txt")
 
 	rsa2048, ok := index["RSA-2048"]
 	if !ok {
@@ -61,7 +67,7 @@ func TestDirReadsParametersOutOfTheCall(t *testing.T) {
 // The honest half: a size that only exists at run time is left unset rather
 // than filled with a plausible default.
 func TestDirLeavesRuntimeParametersUnset(t *testing.T) {
-	found, err := Dir(fixture(t))
+	found, err := Dir(fixture(t, "crypto.go.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +83,104 @@ func TestDirLeavesRuntimeParametersUnset(t *testing.T) {
 }
 
 func TestDirFollowsImportAliases(t *testing.T) {
-	found, err := Dir(fixture(t))
+	if _, ok := scanFixture(t, "crypto.go.txt")["MD5"]; !ok {
+		t.Error("MD5 imported under an alias was missed")
+	}
+}
+
+// A tls.Config is configuration rather than a call: what the code asks for,
+// against what a handshake later negotiates.
+func TestDirReadsATLSConfigLiteral(t *testing.T) {
+	index := scanFixture(t, "tlsconfig.go.txt")
+
+	minimum, ok := index["TLS 1.2"]
+	if !ok {
+		t.Fatalf("MinVersion was not read as a protocol asset; got %v", keys(index))
+	}
+	if minimum.Kind != asset.Protocol || !strings.Contains(minimum.Evidence, "MinVersion") {
+		t.Errorf("MinVersion = %+v, want a protocol asset naming the field it came from", minimum)
+	}
+	if minimum.Location.Line == 0 {
+		t.Error("the configured version has no line number")
+	}
+	if _, ok := index["TLS 1.3"]; !ok {
+		t.Errorf("MaxVersion was not read; got %v", keys(index))
+	}
+
+	// The suite name is the only place the cipher is stated, and it is read the
+	// same way here as it is off a handshake.
+	suite, ok := index["TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"]
+	if !ok {
+		t.Fatalf("a configured cipher suite was not read; got %v", keys(index))
+	}
+	if suite.Algorithm != "AES" || suite.KeySize != 128 || suite.Mode != asset.GCM {
+		t.Errorf("suite = %+v, want AES at 128 bits in GCM", suite)
+	}
+	if !strings.Contains(suite.Evidence, "CipherSuites") {
+		t.Errorf("evidence = %q, want the field it was read from", suite.Evidence)
+	}
+	legacy, ok := index["TLS_RSA_WITH_3DES_EDE_CBC_SHA"]
+	if !ok {
+		t.Fatalf("a configured 3DES suite was not read; got %v", keys(index))
+	}
+	if legacy.Algorithm != "3DES" || legacy.KeySize != 168 {
+		t.Errorf("3DES suite = %+v, want 3DES at 168 bits", legacy)
+	}
+
+	hybrid, ok := index["X25519MLKEM768"]
+	if !ok {
+		t.Fatalf("a configured key exchange group was not read; got %v", keys(index))
+	}
+	if hybrid.Primitive != asset.KeyAgree || !strings.Contains(hybrid.Evidence, "CurvePreferences") {
+		t.Errorf("group = %+v, want a key agreement asset naming the field", hybrid)
+	}
+	if _, ok := index["ECDH-P256"]; !ok {
+		t.Errorf("tls.CurveP256 was not read as a group; got %v", keys(index))
+	}
+}
+
+// A field assembled somewhere else is in the inventory with no value attached:
+// the default the library would have chosen is not what this code configures.
+func TestDirReportsAConfiguredFieldItCannotSee(t *testing.T) {
+	index := scanFixture(t, "tlsconfig.go.txt")
+
+	unstated, ok := index["unstated TLS version"]
+	if !ok {
+		t.Fatalf("a MinVersion set from a variable was dropped; got %v", keys(index))
+	}
+	if unstated.Kind != asset.Protocol || unstated.Location.Line == 0 {
+		t.Errorf("undetermined version = %+v, want a protocol asset with a position", unstated)
+	}
+	for _, want := range []string{"MinVersion", "not determined"} {
+		if !strings.Contains(unstated.Evidence, want) {
+			t.Errorf("evidence = %q, want it to say %q", unstated.Evidence, want)
+		}
+	}
+}
+
+// The literal has to be a crypto/tls one: another package's Config that
+// happens to have a MinVersion field is not cryptography.
+func TestDirReadsOnlyATLSConfig(t *testing.T) {
+	dir := t.TempDir()
+	const source = `package p
+
+import (
+	"crypto/tls"
+
+	"example.com/transport"
+)
+
+var _ = transport.Config{MinVersion: tls.VersionTLS10}
+`
+	if err := os.WriteFile(filepath.Join(dir, "p.go"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	found, err := Dir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := byName(found)["MD5"]; !ok {
-		t.Error("MD5 imported under an alias was missed")
+	if len(found) != 0 {
+		t.Errorf("found %+v, want nothing: the field belongs to another package's type", found)
 	}
 }
 

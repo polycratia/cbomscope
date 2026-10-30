@@ -1,0 +1,29 @@
+// This fixture is source text, not a compiled package: it is stored as .txt so
+// the repository's own build never links it. The scanner reads syntax, so the
+// file only has to parse.
+package sample
+
+import "crypto/tls"
+
+func serverConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS13,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+		},
+		CurvePreferences: []tls.CurveID{
+			tls.X25519MLKEM768,
+			tls.CurveP256,
+		},
+	}
+}
+
+var configuredMinimum = tls.VersionTLS10
+
+// The version arrives in a variable, so the scanner cannot report what this
+// configures.
+func legacyConfig() *tls.Config {
+	return &tls.Config{MinVersion: configuredMinimum}
+}

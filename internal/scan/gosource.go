@@ -2,8 +2,9 @@
 //
 // It reads the syntax tree rather than grepping for names, so an import alias,
 // a comment or a string that happens to say "rsa" does not become a finding.
-// What it cannot see is stated plainly: a key size that arrives in a variable
-// is reported as "not determined", never guessed.
+// What it cannot see is stated plainly: a key size that arrives in a variable,
+// or a tls.Config field assembled at run time, is reported as "not determined",
+// never guessed.
 package scan
 
 import (
@@ -16,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/polycratia/cbomscope/internal/asset"
+	"github.com/polycratia/cbomscope/internal/probe"
 )
 
 // use describes what one call in one crypto package means.
@@ -98,6 +100,16 @@ var table = map[string]map[string]use{
 // curveNames maps elliptic.P256() and friends onto the curve they name.
 var curveNames = map[string]int{"P224": 224, "P256": 256, "P384": 384, "P521": 521}
 
+// watched says whether an import has to be resolved in a file. The table above
+// is most of it; crypto/elliptic and crypto/tls are read for the arguments and
+// the configuration they appear in rather than called into.
+func watched(importPath string) bool {
+	if _, ok := table[importPath]; ok {
+		return true
+	}
+	return importPath == "crypto/elliptic" || importPath == "crypto/tls"
+}
+
 // Dir walks a directory and reports the cryptography it can see in Go sources.
 func Dir(root string) ([]asset.Asset, error) {
 	var found []asset.Asset
@@ -151,7 +163,7 @@ func File(path string) ([]asset.Asset, error) {
 		if err != nil {
 			continue
 		}
-		if _, watched := table[importPath]; !watched && importPath != "crypto/elliptic" {
+		if !watched(importPath) {
 			continue
 		}
 		local := path_base(importPath)
@@ -170,42 +182,165 @@ func File(path string) ([]asset.Asset, error) {
 
 	var found []asset.Asset
 	ast.Inspect(file, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if a, ok := callAsset(fset, n, packages); ok {
+				found = append(found, a)
+			}
+		case *ast.CompositeLit:
+			found = append(found, tlsConfig(fset, n, packages)...)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return true
-		}
-		importPath, ok := packages[ident.Name]
-		if !ok {
-			return true
-		}
-		u, ok := table[importPath][sel.Sel.Name]
-		if !ok {
-			return true
-		}
-
-		position := fset.Position(call.Pos())
-		a := asset.Asset{
-			Name:      u.algorithm,
-			Kind:      asset.Algorithm,
-			Primitive: u.primitive,
-			Algorithm: u.algorithm,
-			KeySize:   u.keySize,
-			Location:  asset.Location{File: position.Filename, Line: position.Line},
-			Evidence:  ident.Name + "." + sel.Sel.Name + "()",
-		}
-		enrich(&a, importPath, sel.Sel.Name, call, packages)
-		found = append(found, a)
 		return true
 	})
 	return found, nil
+}
+
+// callAsset reads one call into the cryptography it uses.
+func callAsset(fset *token.FileSet, call *ast.CallExpr, packages map[string]string) (asset.Asset, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return asset.Asset{}, false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return asset.Asset{}, false
+	}
+	importPath, ok := packages[ident.Name]
+	if !ok {
+		return asset.Asset{}, false
+	}
+	u, ok := table[importPath][sel.Sel.Name]
+	if !ok {
+		return asset.Asset{}, false
+	}
+
+	a := asset.Asset{
+		Name:      u.algorithm,
+		Kind:      asset.Algorithm,
+		Primitive: u.primitive,
+		Algorithm: u.algorithm,
+		KeySize:   u.keySize,
+		Location:  position(fset, call),
+		Evidence:  ident.Name + "." + sel.Sel.Name + "()",
+	}
+	enrich(&a, importPath, sel.Sel.Name, call, packages)
+	return a, true
+}
+
+// configuredField is one crypto/tls configuration field this scanner reads: how
+// to turn a constant written there into an asset, and what the field reads as
+// when its value is not a constant at all.
+type configuredField struct {
+	// list is set where the field holds a slice of constants rather than one.
+	list bool
+	read func(constant string, at asset.Location) (asset.Asset, bool)
+	// undetermined is the shape of the "not determined" reading: the field is in
+	// the inventory with no value attached.
+	undetermined asset.Asset
+}
+
+// configuredFields is what a tls.Config states about its cryptography. The
+// readings come from the probe, so a suite configured in source and the same
+// suite negotiated on the wire are one asset in the inventory rather than two.
+var configuredFields = map[string]configuredField{
+	"MinVersion": {
+		read:         probe.VersionAsset,
+		undetermined: asset.Asset{Name: "unstated TLS version", Kind: asset.Protocol},
+	},
+	"MaxVersion": {
+		read:         probe.VersionAsset,
+		undetermined: asset.Asset{Name: "unstated TLS version", Kind: asset.Protocol},
+	},
+	"CipherSuites": {
+		list: true,
+		read: probe.SuiteAsset,
+		undetermined: asset.Asset{
+			Name: "unstated cipher suite", Kind: asset.Algorithm, Primitive: asset.Unknown,
+		},
+	},
+	"CurvePreferences": {
+		list: true,
+		read: probe.GroupAsset,
+		undetermined: asset.Asset{
+			Name: "unstated key exchange group", Kind: asset.Algorithm, Primitive: asset.KeyAgree,
+		},
+	},
+}
+
+// tlsConfig reads a crypto/tls configuration literal: what the code configures,
+// as against what a handshake later negotiates. A field whose value is not a
+// crypto/tls constant is reported as not determined rather than filled with the
+// default the library would have picked — that default is a guess about code
+// this scanner cannot see.
+func tlsConfig(fset *token.FileSet, lit *ast.CompositeLit, packages map[string]string) []asset.Asset {
+	sel, ok := lit.Type.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Config" {
+		return nil
+	}
+	if ident, ok := sel.X.(*ast.Ident); !ok || packages[ident.Name] != "crypto/tls" {
+		return nil
+	}
+
+	var found []asset.Asset
+	for _, element := range lit.Elts {
+		pair, ok := element.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := pair.Key.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		field, ok := configuredFields[key.Name]
+		if !ok {
+			continue
+		}
+
+		values := []ast.Expr{pair.Value}
+		if field.list {
+			entries, ok := pair.Value.(*ast.CompositeLit)
+			if !ok {
+				found = append(found, field.unread(key.Name, position(fset, pair.Value)))
+				continue
+			}
+			values = entries.Elts
+		}
+		for _, value := range values {
+			at := position(fset, value)
+			if a, ok := field.asset(key.Name, value, packages, at); ok {
+				found = append(found, a)
+				continue
+			}
+			found = append(found, field.unread(key.Name, at))
+		}
+	}
+	return found
+}
+
+// asset reads one value written as tls.X, following the file's import alias
+// like everything else here.
+func (f configuredField) asset(field string, value ast.Expr, packages map[string]string, at asset.Location) (asset.Asset, bool) {
+	sel, ok := value.(*ast.SelectorExpr)
+	if !ok {
+		return asset.Asset{}, false
+	}
+	if ident, ok := sel.X.(*ast.Ident); !ok || packages[ident.Name] != "crypto/tls" {
+		return asset.Asset{}, false
+	}
+	a, ok := f.read(sel.Sel.Name, at)
+	if !ok {
+		return asset.Asset{}, false
+	}
+	a.Evidence = "tls.Config " + field + ": " + a.Evidence
+	return a, true
+}
+
+func (f configuredField) unread(field string, at asset.Location) asset.Asset {
+	a := f.undetermined
+	a.Location = at
+	a.Evidence = "tls.Config " + field + " is not a crypto/tls constant here, " +
+		"so what it configures is not determined"
+	return a
 }
 
 // enrich pulls parameters out of the call where they are literal: the bit size
@@ -260,6 +395,11 @@ func curveArgument(expr ast.Expr, packages map[string]string) (string, int, bool
 		return "", 0, false
 	}
 	return sel.Sel.Name, bits, true
+}
+
+func position(fset *token.FileSet, node ast.Node) asset.Location {
+	at := fset.Position(node.Pos())
+	return asset.Location{File: at.Filename, Line: at.Line}
 }
 
 func path_base(importPath string) string {
