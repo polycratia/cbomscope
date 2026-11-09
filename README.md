@@ -125,6 +125,17 @@ reported with **no size at all** rather than a plausible default. AES-128 and
 AES-256 do not share a verdict, so pretending to know which one it is would be
 the one unforgivable answer.
 
+A `tls.Config` literal is configuration rather than a call: it says what the
+code asks for, against what a handshake later negotiates. A literal `MinVersion`
+or `MaxVersion` becomes a protocol asset, each entry of `CipherSuites` the
+cipher it implies, each entry of `CurvePreferences` the key exchange group it
+names. Those readings are the probe's own, so a suite configured in source and
+the same suite negotiated on the wire arrive in the inventory as one asset and
+not two. A field assembled somewhere else — a version held in a variable, a
+suite list built at run time — is in the inventory with **no value attached**:
+the default the library would have chosen is a guess about code the scanner
+cannot see.
+
 The probe skips certificate verification on purpose: the job is to see what an
 endpoint presents, and an expired or self-signed certificate is exactly the
 inventory that needs attention.
@@ -310,7 +321,7 @@ listed rather than implied.
 
 | | |
 |---|---|
-| Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem` |
+| Source scanning | Go only — the standard library's crypto packages, `x/crypto/chacha20poly1305`, `crypto/mlkem`, and what a `tls.Config` literal configures |
 | Dependencies | `-deps` walks what `go.mod` requires, from `vendor/` or the module cache, and attributes each finding to its module |
 | Live probing | TLS 1.0 and up: version, cipher suite down to 3DES and RC4, key exchange group against the hybrid one the probe offers, RSA key transport where a suite negotiates no group, certificate key and signature |
 | Ordering | `plan` ranks the inventory by posture, exposure and data lifetime, with the arithmetic beside every line |
