@@ -121,6 +121,11 @@ type Asset struct {
 	// for first-party code. It is the difference between cryptography a team can
 	// change and cryptography it has to upgrade away from.
 	Module string `json:"module,omitempty"`
+	// TestOnly marks a finding in code that never ships: a _test.go file or a
+	// testdata directory. Nothing a consumer links reaches it, which is why a
+	// dependency's tests are left out of the inventory altogether and ours are
+	// counted apart from the cryptography that does ship.
+	TestOnly bool `json:"test_only,omitempty"`
 	// Evidence is the literal thing that was seen: the call, the cipher suite,
 	// the certificate field. It lets a reader check the finding by hand.
 	Evidence string `json:"evidence,omitempty"`

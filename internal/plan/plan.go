@@ -5,7 +5,7 @@
 // deployment on earth, so ranking by posture puts the RSA key in a test helper
 // beside the one that signs production tokens. What separates those two is where
 // the asset can be reached from and how long what it protects has to stay
-// secret.
+// secret — and, before either of those, whether the code ships at all.
 //
 //	score = posture × (exposure + lifetime)
 //
@@ -99,16 +99,28 @@ type Report struct {
 	// because a report that omits what it checked reads exactly like one that
 	// never looked.
 	Settled []asset.Asset `json:"settled"`
+	// TestOnly are the findings in code that never ships — a _test.go file, a
+	// testdata directory — counted on a line of their own for the reason the
+	// dependency walk never reads a dependency's tests: nothing a consumer links
+	// reaches them, so ranking them beside shipped code inflates the work.
+	TestOnly []asset.Asset `json:"test_only"`
 }
 
 // Build ranks classified assets by the work they imply.
 func Build(assets []asset.Asset) Report {
 	report := Report{
-		Formula: Formula,
-		Items:   make([]Item, 0, len(assets)),
-		Settled: make([]asset.Asset, 0),
+		Formula:  Formula,
+		Items:    make([]Item, 0, len(assets)),
+		Settled:  make([]asset.Asset, 0),
+		TestOnly: make([]asset.Asset, 0),
 	}
 	for _, a := range assets {
+		// Scope is read before the posture: a broken hash in a test helper is
+		// still broken, and still not work anybody has to schedule.
+		if a.TestOnly {
+			report.TestOnly = append(report.TestOnly, a)
+			continue
+		}
 		posture, ranked := postureFactor(a.Posture)
 		if !ranked {
 			report.Settled = append(report.Settled, a)
@@ -132,6 +144,7 @@ func Build(assets []asset.Asset) Report {
 		return compareAssets(a.Asset, b.Asset)
 	})
 	slices.SortStableFunc(report.Settled, compareAssets)
+	slices.SortStableFunc(report.TestOnly, compareAssets)
 	return report
 }
 

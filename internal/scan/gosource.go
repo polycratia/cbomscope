@@ -111,6 +111,7 @@ func watched(importPath string) bool {
 }
 
 // Dir walks a directory and reports the cryptography it can see in Go sources.
+// A finding in test code is marked rather than dropped: see testOnly.
 func Dir(root string) ([]asset.Asset, error) {
 	var found []asset.Asset
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -138,6 +139,11 @@ func Dir(root string) ([]asset.Asset, error) {
 		if err != nil {
 			return err
 		}
+		if testOnly(path) {
+			for i := range assets {
+				assets[i].TestOnly = true
+			}
+		}
 		found = append(found, assets...)
 		return nil
 	})
@@ -145,6 +151,24 @@ func Dir(root string) ([]asset.Asset, error) {
 		return nil, err
 	}
 	return found, nil
+}
+
+// testOnly says whether a path holds code that never ships: a _test.go file, or
+// anything under a testdata directory. The dependency walk leaves both out of
+// the inventory, since a consumer links neither. In our own tree the finding
+// stays and carries the mark instead — dropping it would hide an inventory
+// somebody asked for, and ranking it as source would put a key generated in a
+// test helper beside the one that signs production tokens.
+func testOnly(path string) bool {
+	if strings.HasSuffix(filepath.Base(path), "_test.go") {
+		return true
+	}
+	for _, element := range strings.Split(filepath.ToSlash(filepath.Dir(path)), "/") {
+		if element == "testdata" {
+			return true
+		}
+	}
+	return false
 }
 
 // File reports the cryptography visible in one Go file.
